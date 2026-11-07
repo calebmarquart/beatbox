@@ -23,13 +23,12 @@
 #include "i2c.h"
 #include "spi.h"
 #include "stm32f4xx_hal.h"
-#include "stm32f4xx_hal_gpio.h"
 #include "stm32f4xx_nucleo.h"
 #include "usart.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "app/app.hpp"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -99,7 +98,7 @@ int main(void) {
   MX_SPI3_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  appInit();
   /* USER CODE END 2 */
 
   /* Initialize leds */
@@ -112,8 +111,7 @@ int main(void) {
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1) {
-    HAL_GPIO_TogglePin(LED2_GPIO_PORT, LED2_PIN);
-    HAL_Delay(1000);
+    appRun();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
