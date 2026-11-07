@@ -1,18 +1,13 @@
-# Keep compilation settings in this file and user/runtime settings in `esp-config.toml`.
-include = ["esp-config.toml"]
+[target.xtensa-esp32-none-elf]
+runner = "espflash flash --monitor --chip esp32"
 
-[target.xtensa-esp32s3-none-elf]
-runner = "espflash flash --monitor --chip esp32s3"
+[env]
+ESP_LOG = "info"
 
 [build]
-rustflags = [
-  "-C",
-  "link-arg=-nostartfiles",
-  "-C",
-  "link-arg=-Wl,--no-warn-rwx-segments",
-]
+rustflags = ["-C", "link-arg=-nostartfiles"]
 
-target = "xtensa-esp32s3-none-elf"
+target = "xtensa-esp32-none-elf"
 
 [unstable]
 build-std = ["alloc", "core"]

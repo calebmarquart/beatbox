@@ -38,7 +38,7 @@ jobs:
         uses: esp-rs/xtensa-toolchain@v1.7.0
         with:
           default: true
-          buildtargets: esp32s3
+          buildtargets: esp32
           ldproxy: false
 
       - name: Cache cargo

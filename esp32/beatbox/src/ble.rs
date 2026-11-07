@@ -1,5 +1,5 @@
 //! BLE peripheral: advertises, serves one GATT service, and streams
-//! samples from `sensor::SAMPLES` as notifications.
+//! raw UART data chunks as notifications.
 
 use bt_hci::controller::ExternalController;
 use embassy_futures::join::join;
@@ -10,7 +10,7 @@ use esp_radio::ble::controller::BleConnector;
 use log::{info, warn};
 use trouble_host::prelude::*;
 
-use crate::sensor::{SAMPLES, SamplePacket};
+use crate::uart::{UART_DATA, UartPacket};
 
 const CONNECTIONS_MAX: usize = 1;
 const L2CAP_CHANNELS_MAX: usize = 1;
@@ -18,17 +18,18 @@ const DEVICE_NAME: &str = "Beatbox";
 
 #[gatt_server]
 struct Server {
-    oximeter: OximeterService,
+    stream: StreamService,
 }
 
 #[gatt_service(uuid = "9f1c0001-4b6a-4c1e-9a52-5d3a7b2e0001")]
-struct OximeterService {
+struct StreamService {
     #[characteristic(uuid = "9f1c0002-4b6a-4c1e-9a52-5d3a7b2e0001", read, notify)]
-    sample: SamplePacket,
+    data: UartPacket,
 }
 
 /// Brings up the BLE stack and runs it forever.
 pub async fn run(bt: BT<'static>) {
+    info!("Starting BLE stack...");
     // Ble transport and controller
     let transport = BleConnector::new(bt, Default::default()).unwrap();
     let ble_controller = ExternalController::<_, 1>::new(transport);
@@ -37,15 +38,17 @@ pub async fn run(bt: BT<'static>) {
     let mac_efuse =
         esp_hal::efuse::interface_mac_address(esp_hal::efuse::InterfaceMacAddress::Bluetooth);
     let address = Address::random(core::array::from_fn(|i| mac_efuse.as_bytes()[i]));
+    info!("BLE MAC address: {:02x?}", address.to_bytes());
 
-    let mut resources: HostResources<_, DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
+    let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
         HostResources::new();
-    let stack = trouble_host::new(ble_controller, &mut resources)
-        .set_random_address(address)
-        .build();
+    let stack = trouble_host::new(ble_controller, &mut resources).set_random_address(address);
 
-    let mut peripheral = stack.peripheral();
-    let runner = stack.runner();
+    let Host {
+        runner,
+        mut peripheral,
+        ..
+    } = stack.build();
 
     let server = Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
         name: DEVICE_NAME,
@@ -92,7 +95,7 @@ pub async fn run(bt: BT<'static>) {
             // Returns when either side finishes (i.e. on disconnect)
             select(
                 gatt_events_task(&conn),
-                notify_task(server.oximeter.sample, &conn),
+                notify_task(&server.stream.data, &conn),
             )
             .await;
 
@@ -130,14 +133,14 @@ async fn gatt_events_task<P: PacketPool>(conn: &GattConnection<'_, '_, P>) {
     }
 }
 
-/// Forwards queued samples to the connected client as notifications.
+/// Forwards queued UART chunks to the connected client as notifications.
 async fn notify_task<P: PacketPool>(
-    sample_char: Characteristic<SamplePacket>,
+    data_char: &Characteristic<UartPacket>,
     conn: &GattConnection<'_, '_, P>,
 ) {
     loop {
-        let packet = SAMPLES.receive().await;
-        if sample_char.notify(conn, &packet, true).await.is_err() {
+        let packet = UART_DATA.receive().await;
+        if data_char.notify(conn, &packet).await.is_err() {
             warn!("notify failed, dropping connection");
             break;
         }

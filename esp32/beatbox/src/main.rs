@@ -8,14 +8,15 @@
 #![deny(clippy::large_stack_frames)]
 
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
+use esp_hal::uart::{Config as UartConfig, UartRx};
 use log::info;
 
 mod ble;
-mod sensor;
+// mod sensor;
+mod uart;
 
 extern crate alloc;
 
@@ -36,11 +37,25 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
+    let sw_interrupt =
+        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
     info!("Embassy initialized!");
-    let _ = spawner;
+
+    // UART1 RX defaults; connect the other controller's TX to GPIO16 and share GND.
+    let uart_rx = UartRx::new(
+        peripherals.UART1,
+        UartConfig::default().with_baudrate(uart::BAUDRATE),
+    )
+    .expect("Failed to initialize UART")
+    .with_rx(peripherals.GPIO16)
+    .into_async();
+
+    info!("UART receiver initialized!");
+    spawner.spawn(uart::receive_task(uart_rx).unwrap());
+    info!("UART receive task spawned!");
 
     // Each module takes the peripherals it needs and runs forever.
-    join(ble::run(peripherals.BT), sensor::run()).await;
+    ble::run(peripherals.BT).await;
     unreachable!()
 }
