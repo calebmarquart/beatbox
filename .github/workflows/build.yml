@@ -1,4 +1,4 @@
-name: Build STM32 firmware
+name: Build firmware
 
 on:
   push:
@@ -11,13 +11,18 @@ concurrency:
   group: build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-defaults:
-  run:
-    working-directory: stm32/beatbox-sensors
+env:
+  # espup (used by the Xtensa toolchain action) queries the GitHub API;
+  # a token avoids rate-limit errors
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
-  build:
+  build-stm32:
+    name: Build STM32 firmware
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: stm32/beatbox-sensors
 
     steps:
       - name: Check out repository
@@ -33,3 +38,35 @@ jobs:
 
       - name: Build
         run: cmake --build --preset Debug
+
+  build-esp32:
+    name: Build ESP32-S3 firmware
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: esp32/beatbox
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust for Xtensa
+        uses: esp-rs/xtensa-toolchain@v1.7.0
+        with:
+          default: true
+          buildtargets: esp32s3
+          ldproxy: false
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: esp32/beatbox
+
+      - name: Build (release)
+        run: cargo build --release --locked
+
+      - name: Upload firmware ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: beatbox-elf
+          path: esp32/beatbox/target/xtensa-esp32s3-none-elf/release/beatbox
