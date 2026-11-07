@@ -1,4 +1,4 @@
-name: Build ESP32-S3 firmware
+name: Build ESP32 firmware
 
 on:
   push:
