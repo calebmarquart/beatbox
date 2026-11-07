@@ -1,0 +1,23 @@
+# Build output
+build/
+cmake-build-*/
+**/build/
+*.bin
+*.hex
+*.elf
+*.map
+*.o
+*.obj
+*.su
+*.d
+*.list
+*.sym
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CMakeUserPresets.json
+
+# VS Code
+.vscode/*
