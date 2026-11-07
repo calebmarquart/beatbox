@@ -1,8 +1,14 @@
-name: Build firmware
+name: Build ESP32-S3 firmware
 
 on:
   push:
+    paths:
+      - "esp32/**"
+      - ".github/workflows/build-esp32.yml"
   pull_request:
+    paths:
+      - "esp32/**"
+      - ".github/workflows/build-esp32.yml"
 
 permissions:
   contents: read
@@ -16,35 +22,13 @@ env:
   # a token avoids rate-limit errors
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+defaults:
+  run:
+    working-directory: esp32/beatbox
+
 jobs:
-  build-stm32:
-    name: Build STM32 firmware
+  build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: stm32/beatbox-sensors
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install build tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y cmake ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib
-
-      - name: Configure
-        run: cmake --preset Debug
-
-      - name: Build
-        run: cmake --build --preset Debug
-
-  build-esp32:
-    name: Build ESP32-S3 firmware
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: esp32/beatbox
 
     steps:
       - name: Check out repository
@@ -69,4 +53,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: beatbox-elf
-          path: esp32/beatbox/target/xtensa-esp32s3-none-elf/release/beatbox
+          path: esp32/beatbox/target/xtensa-esp32-none-elf/release/beatbox
