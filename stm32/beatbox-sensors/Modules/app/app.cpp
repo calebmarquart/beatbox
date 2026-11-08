@@ -20,11 +20,13 @@ Ppg red{cfg.sampleRateHz()};
 Ppg ir{cfg.sampleRateHz()};
 RfOximeter<fsHz> oximeter; // 4 s blocks -> new result every 1 s
 
-static void send(UART_HandleTypeDef &uart, const char *buf, int len) {
+static void sendAll(const char *buf, int len) {
   if (len <= 0) {
     return;
   }
-  HAL_UART_Transmit(&uart, reinterpret_cast<const uint8_t *>(buf), len, 10);
+  const auto *p = reinterpret_cast<const uint8_t *>(buf);
+  HAL_UART_Transmit(&huart2, p, len, 10);
+  HAL_UART_Transmit(&huart4, p, len, 10);
 }
 
 void appInit(void) {
@@ -40,21 +42,15 @@ void appRun() {
   for (const auto &s : std::span{fifo}.first(n)) {
     const float yRed = red.process(s.red);
     const float yIr = ir.process(s.ir);
+    oximeter.push(yRed, yIr); // updates result() once per second
 
-    // waveform stream (scaled to integers, signed)
-    char buf[48];
-    int len = snprintf(buf, sizeof buf, "%.2e,%.2e\r\n", yRed, yIr);
-    send(huart4, buf, len);
-
-    if (!oximeter.push(yRed, yIr)) {
-      continue;
-    }
-
-    // new HR/SpO2 result (every 4 s); -1 = invalid
+    // red_ppm,ir_ppm,hr,spo2,correl  (hr/spo2 = -1 when invalid)
     const auto &r = oximeter.result();
-    len = snprintf(buf, sizeof buf, "HR=%.1f,SPO2=%.1f,C=%.2f\r\n",
-                   r.hrValid ? r.hrBpm : -1.0f, r.spo2Valid ? r.spo2 : -1.0f,
-                   r.correl);
-    send(huart2, buf, len);
+    char buf[64];
+    const int len = snprintf(buf, sizeof buf, "%ld,%ld,%.1f,%.1f,%.2f\r\n",
+                             long(yRed * 1e6f), long(yIr * 1e6f),
+                             r.hrValid ? r.hrBpm : -1.0f,
+                             r.spo2Valid ? r.spo2 : -1.0f, r.correl);
+    sendAll(buf, len);
   }
 }

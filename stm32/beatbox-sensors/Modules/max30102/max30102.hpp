@@ -35,10 +35,10 @@ constexpr uint8_t ledCurrent(float mA) {
 struct Config {
   Mode mode = Mode::SpO2;
   SampleAverage average = SampleAverage::x1;
-  AdcRange range = AdcRange::nA4096;
+  AdcRange range = AdcRange::nA8192;
   SampleRate rate = SampleRate::Hz100;
   PulseWidth pulseWidth = PulseWidth::us411;
-  uint8_t redCurrent = ledCurrent(7.0f);
+  uint8_t redCurrent = ledCurrent(12.0f);
   uint8_t irCurrent = ledCurrent(7.0f);
 
   // Output rate after on-chip averaging

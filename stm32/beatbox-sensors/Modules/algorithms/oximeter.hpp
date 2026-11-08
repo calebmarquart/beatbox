@@ -14,8 +14,10 @@ public:
   static constexpr size_t HOP = FS * HOP_MS / 1000; // 100 -> result every 1s
   static constexpr size_t minLag = FS * 60 / 180;   // 180 bpm
   static constexpr size_t maxLag = FS * 60 / 40;    //  40 bpm
-  static constexpr float minAutoRatio = 0.5f;
-  static constexpr float minPearson = 0.8f;
+  static constexpr float minAutoRatio = 0.6f;       // was 0.5
+  static constexpr float minPearson = 0.8f;         // now gates SpO2 only
+  static constexpr int maxMisses =
+      3; // hold last value for N failed results  // <-- NEW
   static_assert(maxLag + 1 < N, "window too short for MIN_HR");
   static_assert(HOP > 0 && HOP <= N);
 
@@ -49,6 +51,11 @@ public:
     arm_copy_f32(ringIr_ + head_, ir_, tail);
     arm_copy_f32(ringIr_, ir_ + tail, head_);
     compute();
+
+    // Bad window -> repeat last good value, up to maxMisses in a row       //
+    // <-- NEW
+    res_.hrValid = hrHold_.update(res_.hrValid, res_.hrBpm);      // <-- NEW
+    res_.spo2Valid = spo2Hold_.update(res_.spo2Valid, res_.spo2); // <-- NEW
     return true;
   }
 
@@ -68,16 +75,12 @@ private:
       return;
     }
 
-    // 1. Gate: red and ir must move together
+    // 1. Red/IR correlation: computed and reported, but only used for SpO2
     float32_t norm;
     arm_sqrt_f32(irSq * redSq, &norm);
     res_.correl = cross / norm;
-    if (res_.correl < minPearson) {
-      return;
-    }
 
-    // 2. Normalized autocorrelation over the HR range (+1 lag each side so
-    //    every candidate has neighbours). 1.0 = perfectly periodic
+    // 2. Normalized autocorrelation of IR over the HR range
     const float aut0 = irSq / N;
     for (size_t i = 0; i < M; ++i) {
       const size_t lag = minLag - 1 + i;
@@ -86,8 +89,7 @@ private:
       acf_[i] = s / float(N - lag) / aut0;
     }
 
-    // 3. Heart period = first local peak that's strong enough. Taking the
-    //    first (not the biggest) avoids locking onto 2x the period
+    // 3. Heart period = first strong local peak
     size_t i = 1;
     for (; i + 1 < M; ++i) {
       if (acf_[i] >= minAutoRatio && acf_[i] >= acf_[i - 1] &&
@@ -96,10 +98,9 @@ private:
       }
     }
     if (i + 1 >= M) {
-      return; // no periodic signal in 40-180 bpm
+      return; // no periodic signal in 40-180 bpm -> HR and SpO2 invalid
     }
 
-    // Parabolic interpolation through the 3 points -> sub-sample period
     const float a = acf_[i - 1], b = acf_[i], c = acf_[i + 1];
     const float lag =
         float(minLag - 1 + i) + 0.5f * (a - c) / (a - 2.0f * b + c);
@@ -108,7 +109,10 @@ private:
     res_.hrValid = true;
     res_.hrBpm = 60.0f * FS / lag;
 
-    // 4. SpO2: y is already AC/DC, so R is just the RMS ratio (N cancels)
+    // 4. SpO2 needs red and IR to agree; HR above doesn't
+    if (res_.correl < minPearson) {
+      return;
+    }
     arm_sqrt_f32(redSq / irSq, &res_.r);
     if (res_.r > 0.02f && res_.r < 1.84f) {
       res_.spo2 = (-45.060f * res_.r + 30.354f) * res_.r + 94.845f;
@@ -133,6 +137,30 @@ private:
     }
   }
 
+  // Holds the last good value for up to maxMisses bad results, then gives up //
+  // <-- NEW
+  struct Hold {
+    float last = 0.0f;
+    int misses = 0;
+    bool have = false;
+
+    // Returns the validity to report; overwrites v with the held value if used
+    bool update(bool valid, float &v) {
+      if (valid) {
+        last = v;
+        misses = 0;
+        have = true;
+        return true;
+      }
+      if (have && ++misses <= maxMisses) {
+        v = last;
+        return true;
+      }
+      have = false; // too many misses in a row -> -1 until a fresh good one
+      return false;
+    }
+  };
+
   static constexpr size_t M = maxLag - minLag + 3;
 
   float32_t red_[N] = {};
@@ -144,6 +172,8 @@ private:
   size_t filled_ = 0;
   size_t sinceLast_ = 0;
   Result res_;
+  Hold hrHold_;   // <-- NEW
+  Hold spo2Hold_; // <-- NEW
 };
 
 #endif
