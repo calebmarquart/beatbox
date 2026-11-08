@@ -18,7 +18,7 @@ public:
       y_ = x;
       started_ = true;
     } else {
-      y_ += alpha_ * (y_ - x);
+      y_ += alpha_ * (x - y_);
     }
     return y_;
   }
