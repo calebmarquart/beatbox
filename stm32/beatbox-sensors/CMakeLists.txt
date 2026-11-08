@@ -37,6 +37,16 @@ enable_language(C CXX ASM)
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
 
+include(FetchContent)
+FetchContent_Declare(cmsisdsp
+  GIT_REPOSITORY https://github.com/ARM-software/CMSIS-DSP.git
+  GIT_TAG v1.16.2)
+FetchContent_MakeAvailable(cmsisdsp)   # creates the CMSISDSP target
+
+target_include_directories(CMSISDSP PUBLIC ${CMAKE_SOURCE_DIR}/Drivers/CMSIS/Include)
+
+target_link_libraries(${CMAKE_PROJECT_NAME} CMSISDSP)
+
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
 
@@ -48,6 +58,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Modules/app/app.cpp
+    Modules/max30102/max30102.cpp
 )
 
 # Add include paths
