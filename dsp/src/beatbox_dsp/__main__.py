@@ -45,8 +45,8 @@ if __name__ == "__main__":
     torch.manual_seed(0)
     d = data.load()
     train_p, val_p = data.split_patients(d)
-    train = data.make_windows(d, train_p, hop_s=15)
-    val = data.make_windows(d, val_p, hop_s=30)
+    train = data.make_windows(d, train_p, hop_s=data.WINDOW_S // 2)  # 50% overlap
+    val = data.make_windows(d, val_p, hop_s=data.WINDOW_S)  # back-to-back, as on the device
     del d
     if args.quick:
         keep = np.random.default_rng(0).choice(len(train), QUICK_TRAIN_WINDOWS, replace=False)
