@@ -1,11 +1,13 @@
 #include "max30102/max30102.hpp"
-#include "stm32f4xx_hal.h"
-#include "stm32f4xx_hal_def.h"
-#include "stm32f4xx_hal_i2c.h"
 
-constexpr uint16_t i2cAddress = 0x57 << 1; // HAL expects 8-bit address
+#include <array>
+
+namespace max30102 {
+
+constexpr uint16_t i2cAddress = 0x57 << 1; // HAL wants the 8-bit address
 constexpr uint32_t i2cTimeoutMs = 100;
 constexpr uint32_t resetTimeoutMs = 100;
+constexpr uint8_t partId = 0x15;
 
 namespace reg {
 constexpr uint8_t IntStatus1 = 0x00;
@@ -22,60 +24,57 @@ constexpr uint8_t Led2Pa = 0x0D; // IR
 constexpr uint8_t PartId = 0xFF;
 } // namespace reg
 
-constexpr uint8_t partID = 0x15;
+constexpr uint8_t resetBit = 1U << 6;        // MODE_CONFIG
+constexpr uint8_t ppgReadyBit = 1U << 6;     // INT_ENABLE_1
+constexpr uint8_t fifoRolloverBit = 1U << 4; // FIFO_CONFIG
 
-constexpr uint8_t resetModeBit = 1U << 6;
-constexpr uint8_t intPpgReadyBit = 1U << 6;
-constexpr uint8_t fifoRolloverBit = 1U << 4;
+constexpr uint8_t u8(auto e) { return static_cast<uint8_t>(e); }
 
-HAL_StatusTypeDef Max30102::init(const Config &cfg) {
+// 3 bytes, big-endian, 18-bit value
+uint32_t read18bits(const uint8_t *p) {
+  return ((uint32_t{p[0]} << 16) | (uint32_t{p[1]} << 8) | p[2]) & 0x3FFFF;
+}
+
+HAL_StatusTypeDef Sensor::init(const Config &cfg) {
   uint8_t val = 0;
+  HAL_StatusTypeDef s;
 
-  if (auto s = readRegister(reg::PartId, val); s != HAL_OK) {
+  // Check we're talking to a MAX30102
+  if ((s = readRegister(reg::PartId, val)) != HAL_OK) {
     return s;
   }
-
-  if (val != partID) {
+  if (val != partId) {
     return HAL_ERROR;
   }
 
-  // MODE_CONFIG bit 6 = RESET, clears automatically when done
-  if (auto s = writeRegister(reg::ModeConfig, resetModeBit); s != HAL_OK) {
+  // Soft reset; the bit clears itself when done
+  if ((s = writeRegister(reg::ModeConfig, resetBit)) != HAL_OK) {
     return s;
   }
 
   const uint32_t start = HAL_GetTick();
   do {
-    if (auto s = readRegister(reg::ModeConfig, val); s != HAL_OK) {
-      return s;
-    }
-
     if (HAL_GetTick() - start > resetTimeoutMs) {
       return HAL_TIMEOUT;
     }
 
     HAL_Delay(1);
-  } while (val & resetModeBit);
 
-  // Clear PWR_RDY left over from the reset
-  if (auto s = readRegister(reg::IntStatus1, val); s != HAL_OK) {
+    if ((s = readRegister(reg::ModeConfig, val)) != HAL_OK) {
+      return s;
+    }
+  } while (val & resetBit);
+
+  // Reading INT_STATUS_1 clears the PWR_RDY flag left by the reset
+  if ((s = readRegister(reg::IntStatus1, val)) != HAL_OK) {
     return s;
   }
 
-  // FIFO_CONFIG: SMP_AVE[7:5], FIFO_ROLLOVER_EN bit 4
-  const auto fifoCfg = static_cast<uint8_t>(
-      (static_cast<uint8_t>(cfg.average) << 5) | fifoRolloverBit);
+  const uint8_t fifoCfg = (u8(cfg.average) << 5) | fifoRolloverBit;
+  const uint8_t spo2Cfg =
+      (u8(cfg.range) << 5) | (u8(cfg.rate) << 2) | u8(cfg.pulseWidth);
 
-  // SPO2_CONFIG: ADC_REG[6:5], SR[4:2], LED_PW[1:0]
-  const auto spo2Cfg =
-      static_cast<uint8_t>((static_cast<uint8_t>(cfg.range) << 5) |
-                           (static_cast<uint8_t>(cfg.rate) << 2) |
-                           static_cast<uint8_t>(cfg.pulseWidth));
-
-  const struct {
-    uint8_t reg;
-    uint8_t val;
-  } writes[] = {
+  const uint8_t writes[][2] = {
       {reg::FifoConfig, fifoCfg},
       {reg::SpO2Config, spo2Cfg},
       {reg::Led1Pa, cfg.redCurrent},
@@ -83,84 +82,65 @@ HAL_StatusTypeDef Max30102::init(const Config &cfg) {
       {reg::FifoWrPtr, 0},
       {reg::OvfCounter, 0},
       {reg::FifoRdPtr, 0},
-      {reg::IntEnable1, intPpgReadyBit},
-      {reg::ModeConfig, static_cast<uint8_t>(cfg.mode)},
+      {reg::IntEnable1, ppgReadyBit},
+      {reg::ModeConfig, u8(cfg.mode)}, // last: starts sampling
   };
 
   for (const auto &w : writes) {
-    if (auto s = writeRegister(w.reg, w.val); s != HAL_OK) {
+    if ((s = writeRegister(w[0], w[1])) != HAL_OK) {
       return s;
     }
   }
 
-  cfg_ = cfg;
+  mode_ = cfg.mode;
   return HAL_OK;
 }
 
-HAL_StatusTypeDef Max30102::readFifo(std::span<Sample, fifoDepth> out,
-                                     std::size_t &count) {
-  count = 0;
-
-  // FIFO_WR_PTR (0x04), OVF_COUNTER (0x05), FIFO_RD_PTR (0x06) in one burst
-  std::array<uint8_t, 3> ptrs{};
-  if (auto s = HAL_I2C_Mem_Read(&hi2c_, i2cAddress, reg::FifoWrPtr,
-                                I2C_MEMADD_SIZE_8BIT, ptrs.data(), ptrs.size(),
-                                i2cTimeoutMs);
-      s != HAL_OK) {
-    return s;
+std::size_t Sensor::readFifo(std::span<Sample, fifoDepth> out) {
+  // FIFO_WR_PTR, OVF_COUNTER, FIFO_RD_PTR are consecutive, read in one go
+  uint8_t ptrs[3];
+  if (HAL_I2C_Mem_Read(&hi2c_, i2cAddress, reg::FifoWrPtr, I2C_MEMADD_SIZE_8BIT,
+                       ptrs, sizeof ptrs, i2cTimeoutMs) != HAL_OK) {
+    return 0;
   }
 
-  constexpr uint8_t ptrMask = 0x1F;
-  const uint8_t wr = ptrs[0] & ptrMask;
-  const uint8_t ovf = ptrs[1] & ptrMask;
-  const uint8_t rd = ptrs[2] & ptrMask;
+  const uint8_t wr = ptrs[0] & 0x1F;
+  const uint8_t ovf = ptrs[1] & 0x1F;
+  const uint8_t rd = ptrs[2] & 0x1F;
 
-  std::size_t available = static_cast<uint8_t>(wr - rd) & ptrMask;
-
-  // wr == rd means empty or full; a nonzero overflow count means full
-  if (ovf != 0) {
-    samplesLost_ += ovf;
-    available = fifoDepth;
+  // wr == rd means empty, unless samples overflowed, in which case it's full
+  const std::size_t count = ovf ? fifoDepth : ((wr - rd) & 0x1F);
+  if (count == 0) {
+    return 0;
   }
 
-  if (available == 0) {
-    return HAL_OK;
+  const bool spo2 = (mode_ == Mode::SpO2);
+  const std::size_t bytesPerSample = spo2 ? 6 : 3; // Red [, IR]
+
+  std::array<uint8_t, fifoDepth * 6> buf;
+  if (HAL_I2C_Mem_Read(&hi2c_, i2cAddress, reg::FifoData, I2C_MEMADD_SIZE_8BIT,
+                       buf.data(), count * bytesPerSample,
+                       i2cTimeoutMs) != HAL_OK) {
+    return 0;
   }
 
-  // HR mode: 3 bytes per sample (Red). SpO2 mode: 6 bytes (Red, then IR)
-  const bool spo2 = (cfg_.mode == Mode::SpO2);
-  const std::size_t bytesPerSample = spo2 ? 6 : 3;
-
-  std::array<uint8_t, fifoDepth * 6> buffer{};
-  if (auto s = HAL_I2C_Mem_Read(
-          &hi2c_, i2cAddress, reg::FifoData, I2C_MEMADD_SIZE_8BIT,
-          buffer.data(), static_cast<uint16_t>(available * bytesPerSample),
-          i2cTimeoutMs);
-      s != HAL_OK) {
-    return s;
+  for (std::size_t i = 0; i < count; ++i) {
+    const uint8_t *p = &buf[i * bytesPerSample];
+    out[i].red = read18bits(p);
+    out[i].ir = spo2 ? read18bits(p + 3) : 0;
   }
 
-  // Each value is 3 bytes big-endian, left-justified 18-bit ADC value
-  constexpr uint32_t adcMask = 0x3FFFF;
-  const std::span<const uint8_t> bytes{buffer};
-
-  for (std::size_t i = 0; i < available; ++i) {
-    const auto sample = bytes.subspan(i * bytesPerSample, bytesPerSample);
-
-    out[i].red = unpackBe24(sample.first<3>()) & adcMask;
-    out[i].ir = spo2 ? (unpackBe24(sample.subspan<3, 3>()) & adcMask) : 0;
-  }
-
-  count = available;
-  return HAL_OK;
+  return count;
 }
 
-HAL_StatusTypeDef Max30102::writeRegister(uint8_t reg, uint8_t val) {
+HAL_StatusTypeDef Sensor::writeRegister(uint8_t reg, uint8_t val) {
   return HAL_I2C_Mem_Write(&hi2c_, i2cAddress, reg, I2C_MEMADD_SIZE_8BIT, &val,
                            1, i2cTimeoutMs);
 }
 
-HAL_StatusTypeDef Max30102::readRegister(uint8_t reg, uint8_t &val) {
+HAL_StatusTypeDef Sensor::readRegister(uint8_t reg, uint8_t &val) {
   return HAL_I2C_Mem_Read(&hi2c_, i2cAddress, reg, I2C_MEMADD_SIZE_8BIT, &val,
                           1, i2cTimeoutMs);
 }
+
+} // namespace max30102
