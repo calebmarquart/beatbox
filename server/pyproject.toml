@@ -1,0 +1,11 @@
+[project]
+name = "beatbox-server"
+version = "0.1.0"
+description = "BLE listener and local dashboard for the Beatbox device"
+requires-python = ">=3.10"
+dependencies = [
+    "bleak>=0.22,<2",
+]
+
+[tool.uv]
+package = false
