@@ -1,0 +1,38 @@
+[project]
+name = "beatbox-dsp"
+version = "0.1.0"
+description = "Signal processing playground for the beatbox sleep apnea detector"
+authors = [
+    { name = "alwillet", email = "arwillia-chemelex@chemelex.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.11.2",
+    "numpy>=2.5.4",
+    "pandas>=3.1.1",
+    "pyserial>=3.5",
+    "scipy>=1.18.1",
+    "torch>=2.15.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.11,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.4.0",
+    "jupyterlab>=4.6.6",
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+]
+
+# CPU-only PyTorch wheels (avoids multi-GB CUDA downloads).
+# explicit = true: this index is only used for packages pinned to it below.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
