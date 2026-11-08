@@ -36,10 +36,10 @@ struct Config {
   Mode mode = Mode::SpO2;
   SampleAverage average = SampleAverage::x1;
   AdcRange range = AdcRange::nA4096;
-  SampleRate rate = SampleRate::Hz1000;
-  PulseWidth pulseWidth = PulseWidth::us118;
-  uint8_t redCurrent = ledCurrent(20.0f);
-  uint8_t irCurrent = ledCurrent(20.0f);
+  SampleRate rate = SampleRate::Hz100;
+  PulseWidth pulseWidth = PulseWidth::us411;
+  uint8_t redCurrent = ledCurrent(7.0f);
+  uint8_t irCurrent = ledCurrent(7.0f);
 
   // Output rate after on-chip averaging
   constexpr float sampleRateHz() const {

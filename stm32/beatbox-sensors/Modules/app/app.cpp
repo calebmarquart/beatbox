@@ -1,34 +1,31 @@
 #include "app/app.hpp"
+#include "algorithms/oximeter.hpp"
+#include "algorithms/ppg.hpp"
 #include "i2c.h"
 #include "main.h"
 #include "max30102/max30102.hpp"
-#include "ppg/ppg.hpp"
-#include "stm32f4xx_hal_uart.h"
 #include "usart.h"
-#include <cmath>
+#include <array>
 #include <cstddef>
 #include <cstdio>
+#include <span>
 
 using namespace max30102;
 
-constexpr float sampleRateHz(SampleRate r) {
-  constexpr float table[] = {50, 100, 200, 400, 800, 1000, 1600, 3200};
-  return table[static_cast<uint8_t>(r)];
-}
-
-constexpr float effectiveFsHz(const Config &c) {
-  // on-chip averaging divides the output rate
-  return sampleRateHz(c.rate) / float(1u << static_cast<uint8_t>(c.average));
-}
-
-constexpr float fullScaleNa(AdcRange r) {
-  return 2048.0f * float(1u << static_cast<uint8_t>(r));
-}
-
 constexpr Config cfg{};
+constexpr std::size_t fsHz = std::size_t(cfg.sampleRateHz()); // 100
+
 Sensor sensor{hi2c1};
-Ppg red{cfg.fullScaleNanoamps(), cfg.sampleRateHz()};
-Ppg ir{cfg.fullScaleNanoamps(), cfg.sampleRateHz()};
+Ppg red{cfg.sampleRateHz()};
+Ppg ir{cfg.sampleRateHz()};
+RfOximeter<fsHz> oximeter; // 4 s blocks -> new result every 1 s
+
+static void send(UART_HandleTypeDef &uart, const char *buf, int len) {
+  if (len <= 0) {
+    return;
+  }
+  HAL_UART_Transmit(&uart, reinterpret_cast<const uint8_t *>(buf), len, 10);
+}
 
 void appInit(void) {
   if (sensor.init(cfg) != HAL_OK) {
@@ -41,12 +38,23 @@ void appRun() {
   const std::size_t n = sensor.readFifo(fifo);
 
   for (const auto &s : std::span{fifo}.first(n)) {
-    const auto yRed = static_cast<int32_t>(red.process(s.red) * 1e6f);
-    const auto yIr = static_cast<int32_t>(ir.process(s.ir) * 1e6f);
+    const float yRed = red.process(s.red);
+    const float yIr = ir.process(s.ir);
 
-    char buf[32];
-    const int len =
-        snprintf(buf, sizeof buf, "%ld,%ld\r\n", (long)yRed, (long)yIr);
-    HAL_UART_Transmit(&huart4, reinterpret_cast<uint8_t *>(buf), len, 10);
+    // waveform stream (scaled to integers, signed)
+    char buf[48];
+    int len = snprintf(buf, sizeof buf, "%.2e,%.2e\r\n", yRed, yIr);
+    send(huart4, buf, len);
+
+    if (!oximeter.push(yRed, yIr)) {
+      continue;
+    }
+
+    // new HR/SpO2 result (every 4 s); -1 = invalid
+    const auto &r = oximeter.result();
+    len = snprintf(buf, sizeof buf, "HR=%.1f,SPO2=%.1f,C=%.2f\r\n",
+                   r.hrValid ? r.hrBpm : -1.0f, r.spo2Valid ? r.spo2 : -1.0f,
+                   r.correl);
+    send(huart2, buf, len);
   }
 }
