@@ -138,8 +138,8 @@ async fn notify_task<P: PacketPool>(
     conn: &GattConnection<'_, '_, P>,
 ) {
     loop {
-        let packet = UART_DATA.receive().await;
-        if data_char.notify(conn, &packet).await.is_err() {
+        let line = UART_DATA.receive().await;
+        if data_char.notify(conn, &line).await.is_err() {
             esp_println::println!("notify failed, dropping connection");
             break;
         }

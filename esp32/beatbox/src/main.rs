@@ -11,7 +11,7 @@ use embassy_executor::Spawner;
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_hal::uart::{Config as UartConfig, Uart};
+use esp_hal::uart::{Config as UartConfig, RxConfig, Uart};
 
 mod ble;
 // mod sensor;
@@ -42,18 +42,20 @@ async fn main(spawner: Spawner) -> ! {
 
     let uart = Uart::new(
         peripherals.UART2,
-        UartConfig::default().with_baudrate(uart::BAUDRATE),
+        UartConfig::default()
+            .with_baudrate(uart::BAUDRATE)
+            .with_rx(RxConfig::default()),
     )
     .expect("Failed to initialize UART")
     .with_rx(peripherals.GPIO26)
     .with_tx(peripherals.GPIO25)
     .into_async();
-    let (uart_rx, uart_tx) = uart.split();
+    let (uart_rx, _uart_tx) = uart.split();
 
     esp_println::println!("UART receiver initialized!");
     spawner.spawn(uart::receive_task(uart_rx).unwrap());
     esp_println::println!("UART receive task spawned!");
-    spawner.spawn(uart::tx_task(uart_tx).unwrap());
+    // spawner.spawn(uart::tx_task(uart_tx).unwrap());
     esp_println::println!("UART transmit task spawned!");
 
     ble::run(peripherals.BT).await;

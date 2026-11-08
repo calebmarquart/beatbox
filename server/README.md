@@ -18,19 +18,14 @@ uv run ble_listener.py
 
 ## Browser dashboard
 
-Preview the dashboard with generated sample data, without a BLE device:
+Preview the dashboard with generated sample data at 100 samples per second, without a BLE device:
 
 ```sh
 uv run dashboard.py --demo
 ```
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Demo values update every two seconds and include a sample event. For the BLE stream, run `uv run dashboard.py`; it reconnects if the device connection drops. Use `--name` or `--characteristic` to override the BLE defaults, and `--host` or `--port` to change the local web server address. Press Ctrl+C to stop.
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). For the BLE stream, run `uv run dashboard.py`; it reconnects if the device connection drops. Use `--name` or `--characteristic` to override the BLE defaults, and `--host` or `--port` to change the local web server address. Press Ctrl+C to stop.
 
-For BLE measurements, send newline-delimited UTF-8 JSON records, for example:
+Each sample is an ASCII line containing two comma-separated absorbance values, which may use scientific notation: `red_absorbance,ir_absorbance\n`. The dashboard parses and uses the values as-is, without rescaling. A line is at most 23 bytes. Samples are timestamped at 100 Hz (10 ms apart). The listener joins notification chunks until the line ending, so a sample can span BLE notifications.
 
-```json
-{"heart_rate_bpm":72,"spo2_percent":98,"apnea_event":null}
-{"heart_rate_bpm":74,"spo2_percent":97,"apnea_event":{"type":"apnea","description":"Apnea event detected"}}
-```
-
-Records can span multiple BLE notifications; the dashboard joins chunks until the newline. `heart_rate_bpm` and `spo2_percent` are optional numeric fields. A truthy `apnea_event` adds an event to the event list. The dashboard displays events reported by the data source; it does not infer apnea from the measurements.
+The dashboard estimates heart rate from red absorbance using a 1-second moving-average baseline, 5-sample smoothing, prominence-based peak detection, and peak spacing. It estimates SpO₂ from 5-second red and infrared windows using peak-to-peak AC, mean DC, and `SpO₂ = 110 - 25R`. This empirical calculation on absorbance values is only an approximation and is not suitable for medical use.
