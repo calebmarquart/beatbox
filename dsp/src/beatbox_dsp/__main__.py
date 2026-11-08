@@ -15,6 +15,7 @@ from beatbox_dsp import data
 from beatbox_dsp.model import TinyCNN
 
 MODEL_PATH = data.DEFAULT_NPZ.parent / "model.pt"
+QUICK_TRAIN_WINDOWS = 8_000
 
 
 def metrics(logits: np.ndarray, y_soft: np.ndarray) -> dict[str, float]:
@@ -37,6 +38,8 @@ def metrics(logits: np.ndarray, y_soft: np.ndarray) -> dict[str, float]:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=10)
+    ap.add_argument("--quick", action="store_true",
+                    help=f"train on {QUICK_TRAIN_WINDOWS:,} random windows for a fast sanity check")
     args = ap.parse_args()
 
     torch.manual_seed(0)
@@ -45,17 +48,23 @@ if __name__ == "__main__":
     train = data.make_windows(d, train_p, hop_s=15)
     val = data.make_windows(d, val_p, hop_s=30)
     del d
+    if args.quick:
+        keep = np.random.default_rng(0).choice(len(train), QUICK_TRAIN_WINDOWS, replace=False)
+        train = data.Windows(x=train.x[keep], y=train.y[keep], patient=train.patient[keep], feats=train.feats[keep])
     print(f"train patients {train_p}\nval patients   {val_p}")
     for name, w in (("train", train), ("val", val)):
         print(f"{name} {len(w):,} windows, positive share (label >= {data.LABEL_THRESHOLD}) "
               f"{(w.y >= data.LABEL_THRESHOLD).mean():.1%}, shape {w.x.shape[1:]}")
 
-    train_dl = DataLoader(TensorDataset(torch.from_numpy(train.x), torch.from_numpy(train.y)),
-                          batch_size=64, shuffle=True)
-    val_dl = DataLoader(TensorDataset(torch.from_numpy(val.x), torch.from_numpy(val.y)),
-                        batch_size=256)
+    def loader(w: data.Windows, **kw) -> DataLoader:
+        return DataLoader(TensorDataset(torch.from_numpy(w.x), torch.from_numpy(w.feats), torch.from_numpy(w.y)), **kw)
+
+    train_dl = loader(train, batch_size=64, shuffle=True)
+    val_dl = loader(val, batch_size=256)
 
     model = TinyCNN()
+    feats = torch.from_numpy(train.feats)
+    model.set_feature_norm(feats.mean(0), feats.std(0) + 1e-6)
     print("params:", sum(p.numel() for p in model.parameters()))
 
     loss_fn = nn.BCEWithLogitsLoss()
@@ -66,16 +75,16 @@ if __name__ == "__main__":
         t0 = time.time()
         model.train()
         total = 0.0
-        for xb, yb in train_dl:
+        for xb, fb, yb in train_dl:
             opt.zero_grad()
-            loss = loss_fn(model(xb), yb)
+            loss = loss_fn(model(xb, fb), yb)
             loss.backward()
             opt.step()
             total += loss.item() * len(yb)
 
         model.eval()
         with torch.no_grad():
-            logits = torch.cat([model(xb) for xb, _ in val_dl]).numpy()
+            logits = torch.cat([model(xb, fb) for xb, fb, _ in val_dl]).numpy()
         m = metrics(logits, val.y)
 
         print(f"epoch {epoch}: train loss {total / len(train):.3f}  "

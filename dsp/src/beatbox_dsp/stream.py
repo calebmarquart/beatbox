@@ -116,6 +116,8 @@ class StreamingModel:
         self.gru = _Gru(model.gru)
         lin1, _, lin2 = model.head
         self.head = [(l.weight.detach().double().numpy(), l.bias.detach().double().numpy()) for l in (lin1, lin2)]
+        self.feat_mean = model.feat_mean.double().numpy()
+        self.feat_std = model.feat_std.double().numpy()
         self.reset()
 
     def reset(self):
@@ -131,16 +133,18 @@ class StreamingModel:
                 return
         self.gru.step(v)
 
-    def logit(self) -> float:
+    def logit(self, feats: np.ndarray) -> float:
+        """End-of-window output; `feats` are the window's raw vitals (data.FEATURE_NAMES)."""
         (w1, b1), (w2, b2) = self.head
-        a = w1 @ self.gru.h[-1] + b1
+        v = (np.asarray(feats, dtype=np.float64) - self.feat_mean) / self.feat_std
+        a = w1 @ np.concatenate([self.gru.h[-1], v]) + b1
         a = np.where(a > 0, a, np.expm1(a))
         return float((w2 @ a + b2)[0])
 
 
-def stream_window(sm: StreamingModel, x: np.ndarray) -> float:
+def stream_window(sm: StreamingModel, x: np.ndarray, feats: np.ndarray) -> float:
     """Reset, stream one window sample by sample, return the end-of-window logit."""
     sm.reset()
     for v in x:
         sm.step(float(v))
-    return sm.logit()
+    return sm.logit(feats)
