@@ -59,6 +59,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Modules/app/app.cpp
     Modules/max30102/max30102.cpp
+    Modules/apnea/apnea.cpp
 )
 
 # Add include paths

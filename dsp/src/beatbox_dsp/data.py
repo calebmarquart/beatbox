@@ -13,7 +13,7 @@ from beatbox_dsp.preprocess import FS, preprocess_patient
 
 DEFAULT_NPZ = Path(__file__).parents[2] / "assets" / "osas.npz"
 
-WINDOW_S = 30
+WINDOW_S = 60
 LABEL_THRESHOLD = 0.66  # soft label at or above this counts as an event window for metrics
 _LABEL_WEIGHTS = np.hamming(WINDOW_S)
 
