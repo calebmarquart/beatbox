@@ -4,7 +4,8 @@ Export the trained model into the firmware, and check the firmware code against 
     uv run python -m beatbox_dsp.export
 
 1. Writes stm32/beatbox-sensors/Modules/apnea/model_weights.hpp from assets/model.pt
-   (weights, sizes, feature normalisation and filter coefficients - nothing is copied by hand).
+   (weights, sizes and feature normalisation - nothing is copied by hand). The absorbance +
+   band-pass front end is the firmware's own algorithms/ppg.hpp, not part of this export.
 2. If g++ is available, compiles the firmware's Modules/apnea/apnea.cpp on the host together
    with dsp/cpp/host_check.cpp and checks it against PyTorch on real validation windows.
 
@@ -13,7 +14,6 @@ Array layouts (row-major float):
     gru{l}_w_ih [3H][in], gru{l}_w_hh [3H][H]; rows r (0..H-1), z (H..2H-1), n (2H..3H-1)
     head0_w     [FC][H + kNumFeats], input = [GRU top-layer h | normalised vitals]
     head1_w     [1][FC]
-    kBiquad     CMSIS order per stage: b0, b1, b2, a1, a2 (feedback negated), double
 """
 
 import shutil
@@ -27,20 +27,21 @@ from torch import nn
 
 from beatbox_dsp import data
 from beatbox_dsp.model import TinyCNN
-from beatbox_dsp.preprocess import CMSIS_COEFFS, FS, ZSCORE_EPS, ZSCORE_N
-from beatbox_dsp.stream import StreamingFrontEnd
+from beatbox_dsp.preprocess import FS, ZSCORE_EPS, ZSCORE_N, bandpass, zscore_sliding
 
 REPO = Path(__file__).parents[3]
 MODULES = REPO / "stm32" / "beatbox-sensors" / "Modules"
 FIRMWARE_WEIGHTS = MODULES / "apnea" / "model_weights.hpp"
 HOST_CHECK = REPO / "dsp" / "cpp" / "host_check.cpp"
 
-# The C++ runs in float32; references are float32 (torch) / float64 (frontend)
+# The C++ runs in float32; references are float32 (torch) / float64 (z-score)
 LOGIT_TOL = 1e-3
-FRONTEND_TOL = 1e-3
+ZSCORE_TOL = 1e-3
 
 
 def _float_literal(x: float) -> str:
+    if np.isnan(x):
+        return "NAN"
     s = f"{x:.9g}"
     return (s if any(ch in s for ch in ".e") else s + ".0") + "f"  # "0" -> "0.0f" (C++ rejects "0f")
 
@@ -78,11 +79,7 @@ def write_weights(model: TinyCNN, path: Path, window_samples: int = data.WINDOW_
         f"inline constexpr int kWindowSamples = {window_samples};",
         f"inline constexpr int kZscoreN = {ZSCORE_N};",
         f"inline constexpr float kZscoreEps = {ZSCORE_EPS:g}f;",
-        f"inline constexpr int kNumBiquads = {len(CMSIS_COEFFS) // 5};",
         "",
-        "// The band-pass runs in double: in float32 the large absorbance DC level swamps the ~1% pulse,",
-        "// and the 0.2 Hz high-pass feedback amplifies that rounding error ~100x",
-        _array("kBiquad", CMSIS_COEFFS, "double"),
         _array("kConvIn", [c.in_channels for c in convs], "int"),
         _array("kConvOut", [c.out_channels for c in convs], "int"),
     ]
@@ -111,24 +108,30 @@ def write_weights(model: TinyCNN, path: Path, window_samples: int = data.WINDOW_
     path.write_text("\n".join(out))
 
 
-def write_test_vectors(model: TinyCNN, x: np.ndarray, feats: np.ndarray, fe_in: np.ndarray, path: Path) -> None:
-    """x: (n, window samples) model inputs; feats: (n, kNumFeats); fe_in: raw frontend input samples."""
+def write_test_vectors(model: TinyCNN, x: np.ndarray, feats: np.ndarray, z_in: np.ndarray,
+                       spo2: np.ndarray, hr: np.ndarray, path: Path) -> None:
+    """x: (n, window samples) model inputs; feats: (n, kNumFeats) their vitals;
+    z_in: band-passed samples for the z-score check; spo2/hr: (m, k) per-result vitals (NaN = invalid)."""
     with torch.no_grad():
         logits = model(torch.from_numpy(x.astype(np.float32))[:, None], torch.from_numpy(feats.astype(np.float32)))
-    fe = StreamingFrontEnd()
-    fe_out = np.nan_to_num(np.array([fe.step(float(v)) for v in fe_in]))  # warm-up samples are skipped
+    z_out = np.nan_to_num(zscore_sliding(z_in.astype(np.float64)))  # warm-up samples are skipped in C++
+    vitals = np.stack([data.window_features(s, h) for s, h in zip(spo2, hr)])
     n = len(x)
     out = [
         "// GENERATED test vectors for dsp/cpp/host_check.cpp",
         "#pragma once",
+        "#include <cmath>",
         "namespace tv {",
         f"inline constexpr int kN = {n};",
         f"inline constexpr int kLen = {x.shape[1]};",
-        f"inline constexpr int kFeN = {len(fe_in)};",
+        f"inline constexpr int kZN = {len(z_in)};",
+        f"inline constexpr int kVN = {spo2.shape[0]};",
+        f"inline constexpr int kVLen = {spo2.shape[1]};",
         f"inline constexpr float kLogitTol = {LOGIT_TOL:g}f;",
-        f"inline constexpr float kFeTol = {FRONTEND_TOL:g}f;",
+        f"inline constexpr float kZTol = {ZSCORE_TOL:g}f;",
         _array("x", x), _array("feats", feats), _array("logit", _np(logits)),
-        _array("fe_in", fe_in), _array("fe_out", fe_out),
+        _array("z_in", z_in), _array("z_out", z_out),
+        _array("spo2", spo2), _array("hr", hr), _array("vitals", vitals),
         "}  // namespace tv", "",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -142,11 +145,11 @@ def build_and_run_host_check(gen_dir: Path) -> subprocess.CompletedProcess:
     build = subprocess.run(
         ["g++", "-std=c++23", "-O2", "-Wall", "-Wextra", "-Werror", f"-I{gen_dir}", f"-I{MODULES}",
          str(MODULES / "apnea" / "apnea.cpp"), str(HOST_CHECK), "-o", str(exe)],
-        capture_output=True, text=True,
+        check=False, capture_output=True, text=True,
     )
     if build.returncode != 0:
         return build
-    return subprocess.run([str(exe)], capture_output=True, text=True)
+    return subprocess.run([str(exe)], check=False, capture_output=True, text=True)
 
 
 def main() -> None:
@@ -168,11 +171,15 @@ def main() -> None:
     _, val_p = data.split_patients(d)
     val = data.make_windows(d, val_p[:1], hop_s=data.WINDOW_S)
     idx = np.unique(np.r_[np.linspace(0, len(val) - 1, 3).astype(int), np.argmax(val.y)])
-    rows = d["pleth"][d["patient"] == val_p[0]]
-    seg = rows[~np.isnan(rows).any(axis=1)][:20]  # 20 s of real pleth for the frontend check
-    fe_in = resample_poly(seg.astype(np.float64).ravel(), FS, FS_DATASET).astype(np.float32)
+    sel = d["patient"] == val_p[0]
+    rows = d["pleth"][sel]
+    seg = rows[~np.isnan(rows).any(axis=1)][:20]  # 20 s of real pleth, band-passed as Ppg would
+    z_in = bandpass(resample_poly(seg.astype(np.float64).ravel(), FS, FS_DATASET)).astype(np.float32)
+    w = data.WINDOW_S  # three real windows' worth of 1 Hz SpO2 / HR (with their missing values)
+    spo2 = d["spo2"][sel][: 3 * w].reshape(3, w)
+    hr = d["hr"][sel][: 3 * w].reshape(3, w)
     with tempfile.TemporaryDirectory() as tmp:
-        write_test_vectors(model, val.x[idx, 0], val.feats[idx], fe_in, Path(tmp) / "test_vectors.hpp")
+        write_test_vectors(model, val.x[idx, 0], val.feats[idx], z_in, spo2, hr, Path(tmp) / "test_vectors.hpp")
         run = build_and_run_host_check(Path(tmp))
     print(run.stdout + run.stderr)
     print("host check:", "PASS" if run.returncode == 0 else "FAIL")

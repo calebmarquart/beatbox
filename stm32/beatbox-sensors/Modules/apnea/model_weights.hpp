@@ -14,14 +14,6 @@ inline constexpr int kNumFeats = 5;
 inline constexpr int kWindowSamples = 6000;
 inline constexpr int kZscoreN = 256;
 inline constexpr float kZscoreEps = 1e-06f;
-inline constexpr int kNumBiquads = 2;
-
-// The band-pass runs in double: in float32 the large absorbance DC level swamps the ~1% pulse,
-// and the 0.2 Hz high-pass feedback amplifies that rounding error ~100x
-inline constexpr double kBiquad[10] = {
-    0.991153595, -1.98230719, 0.991153595, 1.98222893, -0.98238545099999997, 0.0165819317, 0.033163863299999999, 0.0165819317,
-    1.6041301800000001, -0.67045790599999999
-};
 
 inline constexpr int kConvIn[8] = {
     1, 8, 8, 16, 16, 32, 32, 64

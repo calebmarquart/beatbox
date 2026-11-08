@@ -1,14 +1,17 @@
 #pragma once
 
-// Streaming apnea detector: C++ port of dsp/src/beatbox_dsp/stream.py.
-// No heap, no HAL dependencies (also compiled on the host by dsp/cpp/host_check.cpp).
+// Streaming apnea detector: sample-by-sample version of dsp/src/beatbox_dsp/model.py (TinyCNN),
+// checked against PyTorch by `uv run python -m beatbox_dsp.export` (dsp/cpp/host_check.cpp).
+// No heap, no HAL dependencies, so it also compiles on the host.
 //
-// Per sample (100 sps):
-//   float z = frontEnd.step(absorbance);
+// Signal path (absorbance + 0.2-4.5 Hz band-pass come from algorithms/ppg.hpp):
+//   yRed = red.process(sample.red);            // Ppg
+//   float z = zscore.step(yRed);
 //   if (!std::isnan(z)) model.step(z);
+//   on each new RfOximeter result:  vitals.add(spo2 or NAN, hr or NAN);
 // After weights::kWindowSamples model steps:
-//   float p = model.probability(vitals);
-//   model.reset();              // the front end is NOT reset between windows
+//   float p = model.probability(vitals.features());   // if vitals.ready()
+//   model.reset(); vitals.reset();                     // zscore keeps running
 
 #include <array>
 
@@ -19,17 +22,37 @@ namespace apnea {
 // Window vitals, in this order: spo2_mean, spo2_min, spo2_drop (max - min), hr_mean, hr_range (max - min)
 using Vitals = std::array<float, weights::kNumFeats>;
 
-class FrontEnd {
+// Sliding z-score over the last kZscoreN band-passed samples (population std).
+class ZScore {
  public:
   void reset();
-  // Causal Butterworth band-pass + sliding z-score. Returns NaN for the first kZscoreN - 1 samples.
+  // Returns NaN until kZscoreN samples have been seen.
   float step(float x);
 
  private:
-  // x[n-1], x[n-2], y[n-1], y[n-2] per stage; double, see kBiquad in model_weights.hpp
-  std::array<std::array<double, 4>, weights::kNumBiquads> biquad_{};
   std::array<float, weights::kZscoreN> ring_{};
   unsigned count_ = 0;
+};
+
+// Collects SpO2 / HR results during one window (NaN = invalid result, ignored).
+class WindowVitals {
+ public:
+  void reset();
+  void add(float spo2, float hrBpm);
+  // At least one valid SpO2 and one valid HR result this window (training drops windows otherwise).
+  bool ready() const;
+  Vitals features() const;
+
+ private:
+  struct Stat {
+    float sum = 0.0f;
+    float min = 0.0f;
+    float max = 0.0f;
+    int n = 0;
+    void add(float v);
+  };
+  Stat spo2_{};
+  Stat hr_{};
 };
 
 class Model {

@@ -58,23 +58,12 @@ void gruStep(float* h, int layer, const float* x, int nIn) {
 
 }  // namespace
 
-// ---------------- FrontEnd ----------------
+// ---------------- ZScore ----------------
 
-void FrontEnd::reset() { *this = FrontEnd{}; }
+void ZScore::reset() { *this = ZScore{}; }
 
-float FrontEnd::step(float sample) {
-  double x = sample;
-  for (int s = 0; s < w::kNumBiquads; s++) {  // direct form I, CMSIS coefficient order, in double
-    const double* c = &w::kBiquad[5 * s];
-    auto& st = biquad_[s];
-    const double y = c[0] * x + c[1] * st[0] + c[2] * st[1] + c[3] * st[2] + c[4] * st[3];
-    st[1] = st[0];
-    st[0] = x;
-    st[3] = st[2];
-    st[2] = y;
-    x = y;
-  }
-  ring_[count_ % w::kZscoreN] = static_cast<float>(x);
+float ZScore::step(float x) {
+  ring_[count_ % w::kZscoreN] = x;
   count_++;
   if (count_ < static_cast<unsigned>(w::kZscoreN)) return NAN;
 
@@ -84,6 +73,29 @@ float FrontEnd::step(float sample) {
   float var = 0.0f;
   for (float v : ring_) var += (v - mean) * (v - mean);
   return (x - mean) / (std::sqrt(var / w::kZscoreN) + w::kZscoreEps);
+}
+
+// ---------------- WindowVitals ----------------
+
+void WindowVitals::Stat::add(float v) {
+  if (std::isnan(v)) return;
+  min = n == 0 ? v : std::fmin(min, v);
+  max = n == 0 ? v : std::fmax(max, v);
+  sum += v;
+  n++;
+}
+
+void WindowVitals::reset() { *this = WindowVitals{}; }
+
+void WindowVitals::add(float spo2, float hrBpm) {
+  spo2_.add(spo2);
+  hr_.add(hrBpm);
+}
+
+bool WindowVitals::ready() const { return spo2_.n > 0 && hr_.n > 0; }
+
+Vitals WindowVitals::features() const {
+  return {spo2_.sum / spo2_.n, spo2_.min, spo2_.max - spo2_.min, hr_.sum / hr_.n, hr_.max - hr_.min};
 }
 
 // ---------------- Model ----------------
