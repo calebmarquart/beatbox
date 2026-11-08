@@ -7,7 +7,6 @@ use embassy_futures::select::select;
 use embassy_time::{Duration, Timer};
 use esp_hal::peripherals::BT;
 use esp_radio::ble::controller::BleConnector;
-use log::{info, warn};
 use trouble_host::prelude::*;
 
 use crate::uart::{UART_DATA, UartPacket};
@@ -29,7 +28,7 @@ struct StreamService {
 
 /// Brings up the BLE stack and runs it forever.
 pub async fn run(bt: BT<'static>) {
-    info!("Starting BLE stack...");
+    esp_println::println!("Starting BLE stack...");
     // Ble transport and controller
     let transport = BleConnector::new(bt, Default::default()).unwrap();
     let ble_controller = ExternalController::<_, 1>::new(transport);
@@ -38,7 +37,7 @@ pub async fn run(bt: BT<'static>) {
     let mac_efuse =
         esp_hal::efuse::interface_mac_address(esp_hal::efuse::InterfaceMacAddress::Bluetooth);
     let address = Address::random(core::array::from_fn(|i| mac_efuse.as_bytes()[i]));
-    info!("BLE MAC address: {:02x?}", address.to_bytes());
+    esp_println::println!("BLE MAC address: {:02x?}", address.to_bytes());
 
     let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
         HostResources::new();
@@ -79,7 +78,7 @@ pub async fn run(bt: BT<'static>) {
                 )
                 .await
             else {
-                warn!("advertise failed, retrying");
+                esp_println::println!("advertise failed, retrying");
                 Timer::after(Duration::from_millis(500)).await;
                 continue;
             };
@@ -90,7 +89,7 @@ pub async fn run(bt: BT<'static>) {
             let Ok(conn) = conn.with_attribute_server(&server) else {
                 continue;
             };
-            info!("BLE connected");
+            esp_println::println!("BLE connected");
 
             // Returns when either side finishes (i.e. on disconnect)
             select(
@@ -99,7 +98,7 @@ pub async fn run(bt: BT<'static>) {
             )
             .await;
 
-            info!("BLE disconnected, re-advertising");
+            esp_println::println!("BLE disconnected, re-advertising");
         }
     };
 
@@ -120,7 +119,7 @@ async fn gatt_events_task<P: PacketPool>(conn: &GattConnection<'_, '_, P>) {
     loop {
         match conn.next().await {
             GattConnectionEvent::Disconnected { reason } => {
-                info!("disconnect reason: {:?}", reason);
+                esp_println::println!("disconnect reason: {:?}", reason);
                 break;
             }
             GattConnectionEvent::Gatt { event } => {
@@ -141,7 +140,7 @@ async fn notify_task<P: PacketPool>(
     loop {
         let packet = UART_DATA.receive().await;
         if data_char.notify(conn, &packet).await.is_err() {
-            warn!("notify failed, dropping connection");
+            esp_println::println!("notify failed, dropping connection");
             break;
         }
     }

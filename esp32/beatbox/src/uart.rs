@@ -2,9 +2,9 @@
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_time::{Duration, Timer};
 use esp_hal::Async;
-use esp_hal::uart::UartRx;
-use log::warn;
+use esp_hal::uart::{UartRx, UartTx};
 
 /// UART baud rate must match the connected controller.
 pub const BAUDRATE: u32 = 115_200;
@@ -33,10 +33,24 @@ pub async fn receive_task(mut rx: UartRx<'static, Async>) {
                 packet.extend_from_slice(&read_buf[..len]).unwrap();
 
                 if UART_DATA.try_send(packet).is_err() {
-                    warn!("UART buffer full, dropping received chunk");
+                    esp_println::println!("UART buffer full, dropping received chunk");
                 }
             }
-            Err(error) => warn!("UART receive error: {:?}", error),
+            Err(error) => esp_println::println!("UART receive error: {:?}", error),
         }
+    }
+}
+
+#[embassy_executor::task]
+pub async fn tx_task(mut tx: UartTx<'static, Async>) {
+    let mut counter: u8 = 0;
+    loop {
+        let msg = [0xAA, counter, 0x55];
+        match tx.write_async(&msg).await {
+            Ok(_) => esp_println::println!("uart tx {:02x?}", msg),
+            Err(e) => esp_println::println!("uart tx error: {:?}", e),
+        }
+        counter = counter.wrapping_add(1);
+        Timer::after(Duration::from_secs(1)).await;
     }
 }

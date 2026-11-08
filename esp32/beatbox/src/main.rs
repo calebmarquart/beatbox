@@ -11,8 +11,7 @@ use embassy_executor::Spawner;
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_hal::uart::{Config as UartConfig, UartRx};
-use log::info;
+use esp_hal::uart::{Config as UartConfig, Uart};
 
 mod ble;
 // mod sensor;
@@ -28,8 +27,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    esp_println::logger::init_logger_from_env();
-    info!("Starting ESP32 controller...");
+    esp_println::println!("Starting ESP32 controller...");
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
@@ -40,22 +38,24 @@ async fn main(spawner: Spawner) -> ! {
     let sw_interrupt =
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
-    info!("Embassy initialized!");
+    esp_println::println!("Embassy initialized!");
 
-    // UART1 RX defaults; connect the other controller's TX to GPIO16 and share GND.
-    let uart_rx = UartRx::new(
-        peripherals.UART1,
+    let uart = Uart::new(
+        peripherals.UART2,
         UartConfig::default().with_baudrate(uart::BAUDRATE),
     )
     .expect("Failed to initialize UART")
-    .with_rx(peripherals.GPIO16)
+    .with_rx(peripherals.GPIO26)
+    .with_tx(peripherals.GPIO25)
     .into_async();
+    let (uart_rx, uart_tx) = uart.split();
 
-    info!("UART receiver initialized!");
+    esp_println::println!("UART receiver initialized!");
     spawner.spawn(uart::receive_task(uart_rx).unwrap());
-    info!("UART receive task spawned!");
+    esp_println::println!("UART receive task spawned!");
+    spawner.spawn(uart::tx_task(uart_tx).unwrap());
+    esp_println::println!("UART transmit task spawned!");
 
-    // Each module takes the peripherals it needs and runs forever.
     ble::run(peripherals.BT).await;
     unreachable!()
 }
