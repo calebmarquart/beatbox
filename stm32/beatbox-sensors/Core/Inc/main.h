@@ -63,6 +63,10 @@ void Error_Handler(void);
 #define LED_GRN_GPIO_Port GPIOC
 #define LED_RED_Pin GPIO_PIN_1
 #define LED_RED_GPIO_Port GPIOC
+#define IPC_UART_TX_Pin GPIO_PIN_0
+#define IPC_UART_TX_GPIO_Port GPIOA
+#define IPC_UART_RX_Pin GPIO_PIN_1
+#define IPC_UART_RX_GPIO_Port GPIOA
 #define CLI_UART_TX_Pin GPIO_PIN_2
 #define CLI_UART_TX_GPIO_Port GPIOA
 #define CLI_UART_RX_Pin GPIO_PIN_3
