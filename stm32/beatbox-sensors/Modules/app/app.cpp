@@ -28,6 +28,8 @@ apnea::ZScore zscore;       // keeps running across windows
 apnea::Model apneaModel;    // reset every window
 apnea::WindowVitals vitals; // reset every window
 int windowSteps = 0;
+float apneaProb =
+    -1.0f; // latest window result (-1 = none yet / invalid vitals)
 
 static void sendAll(const char *buf, int len) {
   if (len <= 0) {
@@ -39,7 +41,7 @@ static void sendAll(const char *buf, int len) {
 }
 
 // Feeds one band-passed red sample to the model; at the end of each window,
-// reports the apnea probability (-1 = no valid SpO2/HR this window)
+// updates apneaProb (-1 = no valid SpO2/HR this window)
 static void apneaStep(float yRed) {
   const float z = zscore.step(yRed);
   if (std::isnan(z)) {
@@ -50,11 +52,8 @@ static void apneaStep(float yRed) {
     return;
   }
 
-  const float p =
+  apneaProb =
       vitals.ready() ? apneaModel.probability(vitals.features()) : -1.0f;
-  char buf[32];
-  const int len = snprintf(buf, sizeof buf, "APNEA=%.3f\r\n", p);
-  sendAll(buf, len);
 
   apneaModel.reset();
   vitals.reset();
@@ -76,18 +75,18 @@ void appRun() {
     const float yIr = ir.process(s.ir);
     oximeter.push(yRed, yIr); // updates result() once per second
 
-    // red_ppm,ir_ppm,hr,spo2,correl  (hr/spo2 = -1 when invalid)
     const auto &r = oximeter.result();
-    char buf[64];
-    const int len = snprintf(buf, sizeof buf, "%ld,%ld,%.1f,%.1f,%.2f\r\n",
-                             long(yRed * 1e6f), long(yIr * 1e6f),
-                             r.hrValid ? r.hrBpm : -1.0f,
-                             r.spo2Valid ? r.spo2 : -1.0f, r.correl);
-    sendAll(buf, len);
-
     vitals.add(r.spo2Valid ? r.spo2 : NAN, r.hrValid ? r.hrBpm : NAN);
 
     // after the oximeter, so a window's last vitals result is counted
     apneaStep(yRed);
+
+    // red_ppm,ir_ppm,hr,spo2,correl,apnea  (hr/spo2/apnea = -1 when invalid)
+    char buf[80];
+    const int len = snprintf(buf, sizeof buf, "%ld,%ld,%.1f,%.1f,%.2f,%.3f\r\n",
+                             long(yRed * 1e6f), long(yIr * 1e6f),
+                             r.hrValid ? r.hrBpm : -1.0f,
+                             r.spo2Valid ? r.spo2 : -1.0f, r.correl, apneaProb);
+    sendAll(buf, len);
   }
 }
