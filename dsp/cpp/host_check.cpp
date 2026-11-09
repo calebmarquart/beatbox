@@ -2,11 +2,17 @@
 // Built and run by beatbox_dsp.export (and tests/test_apnea_cpp.py); not part of the firmware.
 #include <cmath>
 #include <cstdio>
+#include <optional>
 
 #include "apnea/apnea.hpp"
 #include "test_vectors.hpp"
 
 static_assert(tv::kLen == apnea::weights::kWindowSamples, "test vectors don't match the model's window length");
+
+static std::optional<float> present(float v) {
+  if (std::isnan(v)) return std::nullopt;
+  return v;
+}
 
 int main() {
   namespace w = apnea::weights;
@@ -15,9 +21,9 @@ int main() {
   apnea::ZScore zscore;
   float zMax = 0.0f;
   for (int i = 0; i < tv::kZN; i++) {
-    const float z = zscore.step(tv::z_in[i]);
+    const std::optional<float> z = zscore.step(tv::z_in[i]);
     if (i < w::kZscoreN - 1) continue;  // warm-up: no output yet
-    const float d = std::fabs(z - tv::z_out[i]);
+    const float d = z ? std::fabs(*z - tv::z_out[i]) : INFINITY;
     if (!(d <= zMax)) zMax = d;  // also catches NaN
   }
   bool ok = zMax <= tv::kZTol;
@@ -26,7 +32,9 @@ int main() {
 
   for (int n = 0; n < tv::kVN; n++) {
     apnea::WindowVitals vitals;
-    for (int i = 0; i < tv::kVLen; i++) vitals.add(tv::spo2[n * tv::kVLen + i], tv::hr[n * tv::kVLen + i]);
+    for (int i = 0; i < tv::kVLen; i++) {
+      vitals.add(present(tv::spo2[n * tv::kVLen + i]), present(tv::hr[n * tv::kVLen + i]));
+    }
     const float* expected = &tv::vitals[n * w::kNumFeats];
     const bool expectReady = !std::isnan(expected[0]) && !std::isnan(expected[3]);
     float vMax = 0.0f;

@@ -62,10 +62,10 @@ void gruStep(float* h, int layer, const float* x, int nIn) {
 
 void ZScore::reset() { *this = ZScore{}; }
 
-float ZScore::step(float x) {
+std::optional<float> ZScore::step(float x) {
   ring_[count_ % w::kZscoreN] = x;
   count_++;
-  if (count_ < static_cast<unsigned>(w::kZscoreN)) return NAN;
+  if (count_ < static_cast<unsigned>(w::kZscoreN)) return std::nullopt;
 
   float mean = 0.0f;
   for (float v : ring_) mean += v;
@@ -77,17 +77,17 @@ float ZScore::step(float x) {
 
 // ---------------- WindowVitals ----------------
 
-void WindowVitals::Stat::add(float v) {
-  if (std::isnan(v)) return;
-  min = n == 0 ? v : std::fmin(min, v);
-  max = n == 0 ? v : std::fmax(max, v);
-  sum += v;
+void WindowVitals::Stat::add(std::optional<float> v) {
+  if (!v) return;
+  min = n == 0 ? *v : std::fmin(min, *v);
+  max = n == 0 ? *v : std::fmax(max, *v);
+  sum += *v;
   n++;
 }
 
 void WindowVitals::reset() { *this = WindowVitals{}; }
 
-void WindowVitals::add(float spo2, float hrBpm) {
+void WindowVitals::add(std::optional<float> spo2, std::optional<float> hrBpm) {
   spo2_.add(spo2);
   hr_.add(hrBpm);
 }

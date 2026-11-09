@@ -4,16 +4,17 @@
 // checked against PyTorch by `uv run python -m beatbox_dsp.export` (dsp/cpp/host_check.cpp).
 // No heap, no HAL dependencies, so it also compiles on the host.
 //
-// Signal path (absorbance + 0.2-4.5 Hz band-pass come from algorithms/ppg.hpp):
-//   yRed = red.process(sample.red);            // Ppg
-//   float z = zscore.step(yRed);
-//   if (!std::isnan(z)) model.step(z);
-//   on each new RfOximeter result:  vitals.add(spo2 or NAN, hr or NAN);
+// Signal path (absorbance + 0.2-4.5 Hz band-pass come from pipeline/stream.hpp):
+//   y_red = red.bandpass(red.adjust_offset(sample.red()));   // Stream
+//   std::optional<float> z = zscore.step(y_red);
+//   if (z) model.step(*z);
+//   on each new RfOximeter result:  vitals.add(result.spo2, result.hrBpm);
 // After weights::kWindowSamples model steps:
 //   float p = model.probability(vitals.features());   // if vitals.ready()
 //   model.reset(); vitals.reset();                     // zscore keeps running
 
 #include <array>
+#include <optional>
 
 #include "apnea/model_weights.hpp"
 
@@ -26,19 +27,19 @@ using Vitals = std::array<float, weights::kNumFeats>;
 class ZScore {
  public:
   void reset();
-  // Returns NaN until kZscoreN samples have been seen.
-  float step(float x);
+  // Returns nothing until kZscoreN samples have been seen.
+  std::optional<float> step(float x);
 
  private:
   std::array<float, weights::kZscoreN> ring_{};
   unsigned count_ = 0;
 };
 
-// Collects SpO2 / HR results during one window (NaN = invalid result, ignored).
+// Collects SpO2 / HR results during one window (empty = invalid result, ignored).
 class WindowVitals {
  public:
   void reset();
-  void add(float spo2, float hrBpm);
+  void add(std::optional<float> spo2, std::optional<float> hrBpm);
   // At least one valid SpO2 and one valid HR result this window (training drops windows otherwise).
   bool ready() const;
   Vitals features() const;
@@ -49,7 +50,7 @@ class WindowVitals {
     float min = 0.0f;
     float max = 0.0f;
     int n = 0;
-    void add(float v);
+    void add(std::optional<float> v);
   };
   Stat spo2_{};
   Stat hr_{};
