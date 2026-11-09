@@ -1,7 +1,5 @@
 #include "max30102/max30102.hpp"
 
-#include <array>
-
 namespace max30102 {
 
 constexpr uint16_t i2cAddress = 0x57 << 1; // HAL wants the 8-bit address
@@ -94,6 +92,62 @@ HAL_StatusTypeDef Sensor::init(const Config &cfg) {
 
   mode_ = cfg.mode;
   return HAL_OK;
+}
+
+bool Sensor::beginFifoReception() {
+  if (state_ == State::Busy) {
+    return false;
+  }
+
+  // FIFO_WR_PTR, OVF_COUNTER, FIFO_RD_PTR are consecutive, read in one go
+  uint8_t ptrs[3];
+  if (HAL_I2C_Mem_Read(&hi2c_, i2cAddress, reg::FifoWrPtr, I2C_MEMADD_SIZE_8BIT,
+                       ptrs, sizeof ptrs, i2cTimeoutMs) != HAL_OK) {
+    return false;
+  }
+
+  const uint8_t wr = ptrs[0] & 0x1F;
+  const uint8_t ovf = ptrs[1] & 0x1F;
+  const uint8_t rd = ptrs[2] & 0x1F;
+
+  // wr == rd means empty, unless samples overflowed, in which case it's full
+  const std::size_t count = ovf ? fifoDepth : ((wr - rd) & 0x1F);
+  if (count == 0) {
+    return false;
+  }
+
+  const std::size_t bytesPerSample = (mode_ == Mode::SpO2) ? 6 : 3;
+
+  pending_ = count;
+  state_ =
+      State::Busy; // set before starting so the interrupt can't be overwritten
+  if (HAL_I2C_Mem_Read_DMA(&hi2c_, i2cAddress, reg::FifoData,
+                           I2C_MEMADD_SIZE_8BIT, rxBuffer_,
+                           uint16_t(count * bytesPerSample)) != HAL_OK) {
+    state_ = State::Idle;
+    return false;
+  }
+  return true;
+}
+
+std::size_t Sensor::takeFifo(std::span<Sample, fifoDepth> out) {
+  const State s = state_;
+  if (s == State::Idle || s == State::Busy) {
+    return 0;
+  }
+  state_ = State::Idle;
+  if (s == State::Error) {
+    return 0;
+  }
+
+  const bool spo2 = (mode_ == Mode::SpO2);
+  const std::size_t bytesPerSample = spo2 ? 6 : 3;
+  for (std::size_t i = 0; i < pending_; ++i) {
+    const uint8_t *p = &rxBuffer_[i * bytesPerSample];
+    out[i].red = read18bits(p);
+    out[i].ir = spo2 ? read18bits(p + 3) : 0;
+  }
+  return pending_;
 }
 
 std::size_t Sensor::readFifo(std::span<Sample, fifoDepth> out) {

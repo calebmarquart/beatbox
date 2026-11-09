@@ -62,16 +62,37 @@ public:
 
   HAL_StatusTypeDef init(const Config &cfg = {});
 
+  // Reads the FIFO pointers, then starts a DMA read of the samples.
+  // Return true if a DMA transfer was started.
+  bool beginFifoReception();
+
+  // If the DMA read finished, decodes it into `out`, oldest first, and returns
+  // the sample count. Returns 0 if still busy, nothing was started, or it
+  // failed.
+  std::size_t takeFifo(std::span<Sample, fifoDepth> out);
+
   // Drains the FIFO into `out`, oldest first. Returns the number of samples
   // read (0 if empty or on I2C error).
   std::size_t readFifo(std::span<Sample, fifoDepth> out);
 
+  bool busy() const { return state_ == State::Busy; }
+
+  void onRxComplete() { state_ = State::Done; }
+  void onRxError() { state_ = State::Error; }
+
 private:
+  enum class State : uint8_t { Idle, Busy, Done, Error };
+
   HAL_StatusTypeDef writeRegister(uint8_t reg, uint8_t val);
   HAL_StatusTypeDef readRegister(uint8_t reg, uint8_t &val);
 
   I2C_HandleTypeDef &hi2c_;
   Mode mode_ = Mode::SpO2;
+
+  volatile State state_ = State::Idle;
+  std::size_t pending_ = 0;
+  uint8_t rxBuffer_[fifoDepth * 6] =
+      {}; // Can't be on the stack because DMA writes here
 };
 
 } // namespace max30102

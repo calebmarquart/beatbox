@@ -40,6 +40,9 @@
         * EXTI
         * Free pins are configured automatically as Analog (this feature is enabled through
         * the Code Generation settings)
+     PC10   ------> SPI3_SCK
+     PC11   ------> SPI3_MISO
+     PC12   ------> SPI3_MOSI
 */
 void MX_GPIO_Init(void)
 {
@@ -101,6 +104,14 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : IMU_SPI_CLK_Pin IMU_SPI_MISO_Pin IMU_SPI_MOSI_Pin */
+  GPIO_InitStruct.Pin = IMU_SPI_CLK_Pin|IMU_SPI_MISO_Pin|IMU_SPI_MOSI_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF6_SPI3;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pin : IMU_SPI_CS_Pin */
   GPIO_InitStruct.Pin = IMU_SPI_CS_Pin;
