@@ -44,7 +44,7 @@ async fn main(spawner: Spawner) -> ! {
         peripherals.UART2,
         UartConfig::default()
             .with_baudrate(uart::BAUDRATE)
-            .with_rx(RxConfig::default()),
+            .with_rx(RxConfig::default().with_fifo_full_threshold(8)),
     )
     .expect("Failed to initialize UART")
     .with_rx(peripherals.GPIO26)

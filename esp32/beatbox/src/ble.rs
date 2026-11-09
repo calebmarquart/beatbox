@@ -9,7 +9,7 @@ use esp_hal::peripherals::BT;
 use esp_radio::ble::controller::BleConnector;
 use trouble_host::prelude::*;
 
-use crate::uart::{UART_DATA, UartPacket};
+use crate::uart::{BLE_PACKET_MAX, BlePacket, UART_DATA};
 
 const CONNECTIONS_MAX: usize = 1;
 const L2CAP_CHANNELS_MAX: usize = 1;
@@ -23,14 +23,15 @@ struct Server {
 #[gatt_service(uuid = "9f1c0001-4b6a-4c1e-9a52-5d3a7b2e0001")]
 struct StreamService {
     #[characteristic(uuid = "9f1c0002-4b6a-4c1e-9a52-5d3a7b2e0001", read, notify)]
-    data: UartPacket,
+    data: BlePacket,
 }
 
 /// Brings up the BLE stack and runs it forever.
 pub async fn run(bt: BT<'static>) {
     esp_println::println!("Starting BLE stack...");
-    // Ble transport and controller
+    esp_println::println!("BLE controller init begin");
     let transport = BleConnector::new(bt, Default::default()).unwrap();
+    esp_println::println!("BLE controller init complete");
     let ble_controller = ExternalController::<_, 1>::new(transport);
 
     // BLE MAC address
@@ -54,8 +55,10 @@ pub async fn run(bt: BT<'static>) {
         appearance: &appearance::UNKNOWN,
     }))
     .unwrap();
+    esp_println::println!("BLE host ready; starting runner and advertising");
 
     let advertise_loop = async {
+        let mut connection_id = 0u32;
         loop {
             // Advertise: flags + name (the host finds us by name)
             let mut adv_data = [0u8; 31];
@@ -83,22 +86,48 @@ pub async fn run(bt: BT<'static>) {
                 continue;
             };
 
-            let Ok(conn) = advertiser.accept().await else {
-                continue;
+            let conn = match advertiser.accept().await {
+                Ok(conn) => conn,
+                Err(error) => {
+                    esp_println::println!("BLE connection accept failed: {:?}", error);
+                    continue;
+                }
             };
-            let Ok(conn) = conn.with_attribute_server(&server) else {
-                continue;
+            connection_id = connection_id.wrapping_add(1);
+            let current_connection_id = connection_id;
+            let conn = match conn.with_attribute_server(&server) {
+                Ok(conn) => conn,
+                Err(error) => {
+                    esp_println::println!(
+                        "BLE connection {}: GATT server attach failed: {:?}",
+                        current_connection_id,
+                        error
+                    );
+                    continue;
+                }
             };
-            esp_println::println!("BLE connected");
+            esp_println::println!(
+                "BLE connection {} accepted; ATT MTU={}, CCCD handle={:?}",
+                current_connection_id,
+                conn.raw().att_mtu(),
+                server.stream.data.cccd_handle
+            );
 
             // Returns when either side finishes (i.e. on disconnect)
             select(
-                gatt_events_task(&conn),
-                notify_task(&server.stream.data, &conn),
+                gatt_events_task(
+                    &conn,
+                    server.stream.data.cccd_handle,
+                    current_connection_id,
+                ),
+                notify_task(&server.stream.data, &conn, current_connection_id),
             )
             .await;
 
-            esp_println::println!("BLE disconnected, re-advertising");
+            esp_println::println!(
+                "BLE connection {} ended; re-advertising",
+                current_connection_id
+            );
         }
     };
 
@@ -115,16 +144,51 @@ async fn ble_task<C: Controller, P: PacketPool>(mut runner: Runner<'_, C, P>) {
 }
 
 /// Answers GATT reads/writes (including subscribe requests) until disconnect.
-async fn gatt_events_task<P: PacketPool>(conn: &GattConnection<'_, '_, P>) {
+async fn gatt_events_task<P: PacketPool>(
+    conn: &GattConnection<'_, '_, P>,
+    cccd_handle: Option<u16>,
+    connection_id: u32,
+) {
     loop {
         match conn.next().await {
             GattConnectionEvent::Disconnected { reason } => {
-                esp_println::println!("disconnect reason: {:?}", reason);
+                esp_println::println!(
+                    "BLE connection {} disconnect reason: {:?}",
+                    connection_id,
+                    reason
+                );
                 break;
             }
             GattConnectionEvent::Gatt { event } => {
-                if let Ok(reply) = event.accept() {
-                    reply.send().await;
+                let cccd_write = match event.payload().incoming() {
+                    trouble_host::att::AttClient::Request(
+                        trouble_host::att::AttReq::Write { handle, data },
+                    )
+                    | trouble_host::att::AttClient::Command(
+                        trouble_host::att::AttCmd::Write { handle, data },
+                    ) if Some(handle) == cccd_handle && data.len() == 2 => {
+                        Some([data[0], data[1]])
+                    }
+                    _ => None,
+                };
+                match event.accept() {
+                    Ok(reply) => {
+                        reply.send().await;
+                        if let Some(value) = cccd_write {
+                            esp_println::println!(
+                                "BLE connection {} notification CCCD write accepted: {:02x?}",
+                                connection_id,
+                                value.as_slice()
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        esp_println::println!(
+                            "BLE connection {} GATT request rejected: {:?}",
+                            connection_id,
+                            error
+                        );
+                    }
                 }
             }
             _ => {}
@@ -132,16 +196,51 @@ async fn gatt_events_task<P: PacketPool>(conn: &GattConnection<'_, '_, P>) {
     }
 }
 
-/// Forwards queued UART chunks to the connected client as notifications.
+/// Forwards each queued UART line in MTU-sized notification fragments.
 async fn notify_task<P: PacketPool>(
-    data_char: &Characteristic<UartPacket>,
+    data_char: &Characteristic<BlePacket>,
     conn: &GattConnection<'_, '_, P>,
+    connection_id: u32,
 ) {
-    loop {
-        let line = UART_DATA.receive().await;
-        if data_char.notify(conn, &line).await.is_err() {
-            esp_println::println!("notify failed, dropping connection");
-            break;
+    let mut pending: Option<(crate::uart::UartPacket, usize)> = None;
+
+    'notifications: loop {
+        let max_payload = usize::from(conn.raw().att_mtu())
+            .saturating_sub(3)
+            .min(BLE_PACKET_MAX);
+        let mut packet = BlePacket::new();
+
+        while packet.len() < max_payload {
+            if pending.is_none() {
+                pending = if packet.is_empty() {
+                    Some((UART_DATA.receive().await, 0))
+                } else {
+                    UART_DATA.try_receive().ok().map(|line| (line, 0))
+                };
+                if pending.is_none() {
+                    break;
+                }
+            }
+
+            let (line, offset) = pending.take().unwrap();
+            let count = (line.len() - offset).min(max_payload - packet.len());
+            packet
+                .extend_from_slice(&line.as_slice()[offset..offset + count])
+                .unwrap();
+
+            if offset + count < line.len() {
+                pending = Some((line, offset + count));
+            }
+        }
+
+        // The receiver rebuilds records until LF, so packing may split a line
+        // across notifications or include bytes from multiple samples.
+        if data_char.notify(conn, &packet).await.is_err() {
+            esp_println::println!(
+                "BLE connection {} notify failed, dropping connection",
+                connection_id
+            );
+            break 'notifications;
         }
     }
 }

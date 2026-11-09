@@ -8,15 +8,23 @@ use esp_hal::uart::UartRx;
 /// UART baud rate must match the connected controller.
 pub const BAUDRATE: u32 = 115_200;
 
-/// Maximum CSV line size, including its line ending, forwarded to BLE.
+/// Maximum CSV record size, including CR/LF. Matches the server's 48-byte limit.
 pub const UART_LINE_MAX: usize = 48;
+/// Maximum ATT MTU supported by Trouble Host's default 251-byte packet pool.
+pub const BLE_ATT_MTU_MAX: usize = 247;
+/// A notification value uses three ATT bytes for its opcode and handle.
+pub const BLE_PACKET_MAX: usize = BLE_ATT_MTU_MAX - 3;
 const READ_BUFFER_SIZE: usize = 1028;
-// Buffers about 2.56 seconds of lines at 100 samples per second.
-const QUEUE_DEPTH: usize = 256;
+const QUEUE_DEPTH: usize = 512;
 const LOG_EVERY_LINES: u32 = 100;
+/// Forward one sample for every N complete UART samples; intervening samples are discarded.
+pub const SEND_EVERY_N_SAMPLES: u32 = 1;
+const _: () = assert!(SEND_EVERY_N_SAMPLES > 0);
 
 /// Raw UART line, including CR/LF, forwarded unchanged to BLE.
 pub type UartPacket = heapless::Vec<u8, UART_LINE_MAX>;
+/// One BLE notification payload, up to the negotiated ATT MTU limit.
+pub type BlePacket = heapless::Vec<u8, BLE_PACKET_MAX>;
 
 /// UART task hands complete raw lines to the BLE task through this bounded buffer.
 pub static UART_DATA: Channel<CriticalSectionRawMutex, UartPacket, QUEUE_DEPTH> = Channel::new();
@@ -62,13 +70,15 @@ pub async fn receive_task(mut rx: UartRx<'static, Async>) {
                         }
                         lines_seen = lines_seen.wrapping_add(1);
 
-                        if UART_DATA.try_send(line.clone()).is_err() {
-                            if !queue_full_reported {
-                                esp_println::println!("UART BLE queue full; dropping lines");
-                                queue_full_reported = true;
+                        if lines_seen % SEND_EVERY_N_SAMPLES == 0 {
+                            if UART_DATA.try_send(line.clone()).is_err() {
+                                if !queue_full_reported {
+                                    esp_println::println!("UART BLE queue full; dropping lines");
+                                    queue_full_reported = true;
+                                }
+                            } else {
+                                queue_full_reported = false;
                             }
-                        } else {
-                            queue_full_reported = false;
                         }
 
                         line.clear();
