@@ -1,92 +1,87 @@
 #include "app/app.hpp"
-#include "algorithms/oximeter.hpp"
-#include "algorithms/ppg.hpp"
-#include "apnea/apnea.hpp"
+#include "app/interrupts.hpp"
 #include "i2c.h"
 #include "main.h"
 #include "max30102/max30102.hpp"
+#include "pipeline/pipeline.hpp"
+#include "uart/dma_writer.hpp"
+#include "units/absorbance.hpp"
 #include "usart.h"
 #include <array>
-#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <span>
 
 using namespace max30102;
 
-constexpr Config cfg{};
-constexpr size_t fsHz = size_t(cfg.sampleRateHz()); // 100
+constexpr Config cfg {};
 
-Sensor sensor{hi2c1};
-Ppg red{cfg.sampleRateHz()};
-Ppg ir{cfg.sampleRateHz()};
-RfOximeter<fsHz> oximeter; // 4 s blocks -> new result every 1 s
+static Sensor sensor { hi2c1 };
+static pipeline::Pipeline ppgPipeline;
+static std::array<pipeline::Processed, Sensor::fifoDepth> processed;
+static uart::DmaWriter *waveform_writer = nullptr;
 
-// Apnea model: z-scored red waveform + window vitals -> probability every 60 s
-static_assert(fsHz == 100, "the apnea model was trained on 100 sps");
-apnea::ZScore zscore;       // keeps running across windows
-apnea::Model apneaModel;    // reset every window
-apnea::WindowVitals vitals; // reset every window
-int windowSteps = 0;
-float apneaProb =
-    -1.0f; // latest window result (-1 = none yet / invalid vitals)
+// Latest HR/SpO2 result (new every 1 s) and apnea probability (new every
+// window), repeated on every sample line. -1 = none yet / invalid
+static RfOximeter<pipeline::kPipelineFsHz>::Result latestVitals {};
+static float latestApnea = -1.0f;
 
-static void sendAll(const char *buf, int len) {
-  if (len <= 0) {
-    return;
-  }
-  const auto *p = reinterpret_cast<const uint8_t *>(buf);
-  HAL_UART_Transmit(&huart2, p, len, 10);
-  HAL_UART_Transmit(&huart4, p, len, 10);
+static void send(UART_HandleTypeDef &uart, const char *buf, int len) {
+    if (len <= 0) {
+        return;
+    }
+
+    HAL_UART_Transmit(&uart, reinterpret_cast<const uint8_t *>(buf), len, 10);
 }
 
-// Feeds one band-passed red sample to the model; at the end of each window,
-// updates apneaProb (-1 = no valid SpO2/HR this window)
-static void apneaStep(float yRed) {
-  const float z = zscore.step(yRed);
-  if (std::isnan(z)) {
-    return; // z-score warm-up (first 256 samples)
-  }
-  apneaModel.step(z);
-  if (++windowSteps < apnea::weights::kWindowSamples) {
-    return;
-  }
-
-  apneaProb =
-      vitals.ready() ? apneaModel.probability(vitals.features()) : -1.0f;
-
-  apneaModel.reset();
-  vitals.reset();
-  windowSteps = 0;
-}
-
-void appInit(void) {
-  if (sensor.init(cfg) != HAL_OK) {
-    Error_Handler();
-  }
-}
-
-void appRun() {
-  std::array<Sample, Sensor::fifoDepth> fifo{};
-  const std::size_t n = sensor.readFifo(fifo);
-
-  for (const auto &s : std::span{fifo}.first(n)) {
-    const float yRed = red.process(s.red);
-    const float yIr = ir.process(s.ir);
-    oximeter.push(yRed, yIr); // updates result() once per second
-
-    const auto &r = oximeter.result();
-    vitals.add(r.spo2Valid ? r.spo2 : NAN, r.hrValid ? r.hrBpm : NAN);
-
-    // after the oximeter, so a window's last vitals result is counted
-    apneaStep(yRed);
+static void report(const pipeline::Processed &o) {
+    if (o.vitals) {
+        latestVitals = *o.vitals;
+    }
+    if (o.apnea_likelihood) {
+        latestApnea = *o.apnea_likelihood;
+    }
 
     // red_ppm,ir_ppm,hr,spo2,correl,apnea  (hr/spo2/apnea = -1 when invalid)
     char buf[80];
     const int len = snprintf(buf, sizeof buf, "%ld,%ld,%.1f,%.1f,%.2f,%.3f\r\n",
-                             long(yRed * 1e6f), long(yIr * 1e6f),
-                             r.hrValid ? r.hrBpm : -1.0f,
-                             r.spo2Valid ? r.spo2 : -1.0f, r.correl, apneaProb);
-    sendAll(buf, len);
-  }
+                             long(o.y_red * 1e6f), long(o.y_ir * 1e6f),
+                             latestVitals.hrBpm.value_or(-1.0f),
+                             latestVitals.spo2.value_or(-1.0f),
+                             latestVitals.correl, latestApnea);
+    if (len <= 0 || std::size_t(len) >= sizeof buf) {
+        return;
+    }
+
+    waveform_writer->write({buf, static_cast<std::size_t>(len)});
+    send(huart2, buf, len);
+}
+
+void appInit(void) {
+    waveform_writer = &interrupts::init(huart4);
+
+    if (sensor.init(cfg) != HAL_OK) {
+        Error_Handler();
+    }
+}
+
+void appRun() {
+    std::array<Sample, Sensor::fifoDepth> fifo{};
+    const std::size_t n = sensor.readFifo(fifo);
+
+    std::array<pipeline::Sample, Sensor::fifoDepth> absorbance{};
+    for (std::size_t i = 0; i < n; ++i) {
+        absorbance[i] = pipeline::Sample(Absorbance::try_from_counts(fifo[i].red),
+                                         Absorbance::try_from_counts(fifo[i].ir));
+    }
+
+    if (!ppgPipeline.run(std::span{absorbance}.first(n), processed)) {
+        Error_Handler();
+    }
+
+    for (const auto &o : std::span{processed}.first(n)) {
+        report(o);
+    }
+
+    waveform_writer->flush();
 }

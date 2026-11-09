@@ -1,12 +1,13 @@
 // Heart rate + SpO2, based on R. Fraczkiewicz's MAX30102_by_RF
 // (github.com/aromring/MAX30102_by_RF, MIT-style license), using CMSIS-DSP.
-// Inputs: Ppg::process() outputs (bandpassed absorbance ~ -AC/DC).
+// Inputs: Stream::bandpass() outputs (bandpassed absorbance ~ -AC/DC).
 
 #ifndef RF_OXIMETER_HPP
 #define RF_OXIMETER_HPP
 
 #include "arm_math.h"
 #include <cstddef>
+#include <optional>
 
 template <size_t FS, size_t ST = 4, size_t HOP_MS = 1000> class RfOximeter {
 public:
@@ -16,16 +17,13 @@ public:
   static constexpr size_t maxLag = FS * 60 / 40;    //  40 bpm
   static constexpr float minAutoRatio = 0.6f;       // was 0.5
   static constexpr float minPearson = 0.8f;         // now gates SpO2 only
-  static constexpr int maxMisses =
-      3; // hold last value for N failed results  // <-- NEW
+  static constexpr int maxMisses = 3; // hold last value for N failed results
   static_assert(maxLag + 1 < N, "window too short for MIN_HR");
   static_assert(HOP > 0 && HOP <= N);
 
   struct Result {
-    bool hrValid = false;
-    bool spo2Valid = false;
-    float hrBpm = 0.0f;
-    float spo2 = 0.0f;
+    std::optional<float> hrBpm;
+    std::optional<float> spo2;
     float r = 0.0f;
     float correl = 0.0f;
     float autoRatio = 0.0f;
@@ -52,10 +50,9 @@ public:
     arm_copy_f32(ringIr_, ir_ + tail, head_);
     compute();
 
-    // Bad window -> repeat last good value, up to maxMisses in a row       //
-    // <-- NEW
-    res_.hrValid = hrHold_.update(res_.hrValid, res_.hrBpm);      // <-- NEW
-    res_.spo2Valid = spo2Hold_.update(res_.spo2Valid, res_.spo2); // <-- NEW
+    // Bad window -> repeat last good value, up to maxMisses in a row
+    res_.hrBpm = hrHold_.update(res_.hrBpm);
+    res_.spo2 = spo2Hold_.update(res_.spo2);
     return true;
   }
 
@@ -106,7 +103,6 @@ private:
         float(minLag - 1 + i) + 0.5f * (a - c) / (a - 2.0f * b + c);
 
     res_.autoRatio = b;
-    res_.hrValid = true;
     res_.hrBpm = 60.0f * FS / lag;
 
     // 4. SpO2 needs red and IR to agree; HR above doesn't
@@ -116,7 +112,6 @@ private:
     arm_sqrt_f32(redSq / irSq, &res_.r);
     if (res_.r > 0.02f && res_.r < 1.84f) {
       res_.spo2 = (-45.060f * res_.r + 30.354f) * res_.r + 94.845f;
-      res_.spo2Valid = true;
     }
   }
 
@@ -137,27 +132,23 @@ private:
     }
   }
 
-  // Holds the last good value for up to maxMisses bad results, then gives up //
-  // <-- NEW
+  // Holds the last good value for up to maxMisses bad results, then gives up
   struct Hold {
-    float last = 0.0f;
+    std::optional<float> last;
     int misses = 0;
-    bool have = false;
 
-    // Returns the validity to report; overwrites v with the held value if used
-    bool update(bool valid, float &v) {
-      if (valid) {
+    // Returns the value to report: v if present, else the held value
+    std::optional<float> update(std::optional<float> v) {
+      if (v) {
         last = v;
         misses = 0;
-        have = true;
-        return true;
+        return v;
       }
-      if (have && ++misses <= maxMisses) {
-        v = last;
-        return true;
+      if (last && ++misses <= maxMisses) {
+        return last;
       }
-      have = false; // too many misses in a row -> -1 until a fresh good one
-      return false;
+      last.reset(); // too many misses in a row -> -1 until a fresh good one
+      return std::nullopt;
     }
   };
 
@@ -172,8 +163,8 @@ private:
   size_t filled_ = 0;
   size_t sinceLast_ = 0;
   Result res_;
-  Hold hrHold_;   // <-- NEW
-  Hold spo2Hold_; // <-- NEW
+  Hold hrHold_;
+  Hold spo2Hold_;
 };
 
 #endif

@@ -1,6 +1,7 @@
 #ifndef MAX30102_HPP
 #define MAX30102_HPP
 
+#include "max30102/sample.hpp"
 #include "stm32f4xx_hal.h"
 #include <cstddef>
 #include <cstdint>
@@ -51,12 +52,6 @@ struct Config {
   constexpr float fullScaleNanoamps() const {
     return 2048.0f * float(1u << static_cast<uint8_t>(range));
   }
-};
-
-// Raw 18-bit ADC counts (ir = 0 in HeartRate mode)
-struct Sample {
-  uint32_t red;
-  uint32_t ir;
 };
 
 class Sensor {
