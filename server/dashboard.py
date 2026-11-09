@@ -9,6 +9,7 @@ import math
 import queue
 import sqlite3
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,12 +19,20 @@ from urllib.parse import parse_qs, urlsplit
 from bleak import BleakClient, BleakScanner
 from bleak.backends.characteristic import BleakGATTCharacteristic
 
+# BLE configuration
 DEFAULT_DEVICE_NAME = "Beatbox"
 DATA_CHARACTERISTIC_UUID = "9f1c0002-4b6a-4c1e-9a52-5d3a7b2e0001"
+
+# Sensor history
 MAX_HISTORY = 3000
 SAMPLE_RATE_HZ = 100
 MAX_RECORD_SIZE = 48
+
+# Heart rate and sleep apnea detection parameters
 APNEA_PROBABILITY_THRESHOLD = 0.26
+
+# Data smoothing parameters
+HEART_RATE_HALF_LIFE_SECONDS = 15.0
 
 PAGE = r"""<!doctype html>
 <html lang="en">
@@ -110,7 +119,7 @@ PAGE = r"""<!doctype html>
   <section id="live-view" class="grid">
     <article class="card"><h2>Red value</h2><p id="red-hint" class="hint">Waiting for data</p><canvas id="red-chart" aria-label="Red values over time"></canvas><div class="chart-controls" data-chart="red-chart"><button type="button" data-action="time-in" title="Zoom in horizontally">Time +</button><button type="button" data-action="time-out" title="Zoom out horizontally">Time −</button><button type="button" data-action="reset">Reset</button></div></article>
     <article class="card"><h2>IR value</h2><p id="ir-hint" class="hint">Waiting for data</p><canvas id="ir-chart" aria-label="IR values over time"></canvas><div class="chart-controls" data-chart="ir-chart"><button type="button" data-action="time-in" title="Zoom in horizontally">Time +</button><button type="button" data-action="time-out" title="Zoom out horizontally">Time −</button><button type="button" data-action="reset">Reset</button></div></article>
-    <article class="card"><h2>Heart rate</h2><div><span id="heart-rate" class="metric">--</span> <span class="unit">BPM</span></div><p id="hr-hint" class="hint">Waiting for data</p><canvas id="hr-chart" aria-label="Heart rate over time"></canvas><div class="chart-controls" data-chart="hr-chart"><button type="button" data-action="time-in" title="Zoom in horizontally">Time +</button><button type="button" data-action="time-out" title="Zoom out horizontally">Time −</button><button type="button" data-action="reset">Reset</button></div></article>
+    <article class="card"><h2>Heart rate</h2><div><span id="heart-rate" class="metric">--</span> <span class="unit">BPM</span></div><p id="hr-hint" class="hint">EWMA smoothed · Waiting for data</p><canvas id="hr-chart" aria-label="EWMA-smoothed heart rate over time"></canvas><div class="chart-controls" data-chart="hr-chart"><button type="button" data-action="time-in" title="Zoom in horizontally">Time +</button><button type="button" data-action="time-out" title="Zoom out horizontally">Time −</button><button type="button" data-action="reset">Reset</button></div></article>
     <article class="card"><h2>SpO₂</h2><div><span id="spo2-estimate" class="metric">--</span> <span class="unit">%</span></div><p id="spo2-hint" class="hint">Waiting for data</p><canvas id="spo2-chart" aria-label="SpO2 percent over time"></canvas><div class="chart-controls" data-chart="spo2-chart"><button type="button" data-action="time-in" title="Zoom in horizontally">Time +</button><button type="button" data-action="time-out" title="Zoom out horizontally">Time −</button><button type="button" data-action="reset">Reset</button></div></article>
     <article class="card wide"><h2>Sleep apnea probability</h2><div><span id="apnea-probability" class="metric">--</span></div><label class="threshold-control" for="apnea-threshold">Alarm threshold <input id="apnea-threshold" type="range" min="0" max="1" step="0.01" value="0.26"><output id="apnea-threshold-value" for="apnea-threshold">0.26</output></label><p id="apnea-hint" class="hint">Alarm sounds when probability is above the threshold.</p><canvas id="apnea-chart" aria-label="Sleep apnea probability over time"></canvas><div class="chart-controls" data-chart="apnea-chart"><button type="button" data-action="time-in" title="Zoom in horizontally">Time +</button><button type="button" data-action="time-out" title="Zoom out horizontally">Time −</button><button type="button" data-action="reset">Reset</button></div></article>
   </section>
@@ -131,8 +140,8 @@ PAGE = r"""<!doctype html>
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Timestamp</th><th>Red</th><th>IR</th><th>Heart rate (BPM)</th><th>SpO₂ (%)</th><th>Sleep apnea probability</th></tr></thead>
-        <tbody id="history-rows"><tr><td colspan="6">Loading…</td></tr></tbody>
+        <thead><tr><th>Timestamp</th><th>Red</th><th>IR</th><th>Heart rate raw (BPM)</th><th>Heart rate EWMA (BPM)</th><th>SpO₂ (%)</th><th>Sleep apnea probability</th></tr></thead>
+        <tbody id="history-rows"><tr><td colspan="7">Loading…</td></tr></tbody>
       </table>
     </div>
     <div class="history-footer"><span id="history-count" class="hint"></span><button id="history-older" class="download" type="button" disabled>Load older samples</button></div>
@@ -167,6 +176,7 @@ const history = {
   red_value: [],
   ir_value: [],
   heart_rate_bpm: [],
+  heart_rate_ewma_bpm: [],
   spo2_percent: [],
   apnea_probability: [],
 };
@@ -187,12 +197,20 @@ const formatNumber = (value, digits = 6) => Number(value).toPrecision(digits)
   .replace(/(\.\d*?[1-9])0+(e|$)/, '$1$2')
   .replace(/\.0+(e|$)/, '$1');
 
-function autoRange(values) {
+function autoRange(values, minimumSpan = 0) {
   const dataMin = Math.min(...values);
   const dataMax = Math.max(...values);
-  const span = dataMax - dataMin;
+  let span = dataMax - dataMin;
+  let rangeMin = dataMin;
+  let rangeMax = dataMax;
+  if (span < minimumSpan) {
+    const center = (dataMin + dataMax) / 2;
+    span = minimumSpan;
+    rangeMin = center - span / 2;
+    rangeMax = center + span / 2;
+  }
   const padding = span > 0 ? span * 0.1 : Math.max(Math.abs(dataMin) * 0.01, 1e-9);
-  return { min: dataMin - padding, max: dataMax + padding };
+  return { min: rangeMin - padding, max: rangeMax + padding };
 }
 
 function drawChart(id, points, color) {
@@ -214,10 +232,17 @@ function drawChart(id, points, color) {
   const end = Date.parse(points[points.length - 1].time);
   const start = end - range.windowSeconds * 1000;
   const visiblePoints = points.filter((point) => Date.parse(point.time) >= start);
-  const { min, max } = autoRange(visiblePoints.map((point) => point.value));
+  const minimumSpan = id === 'hr-chart' ? 20 : 0;
+  const { min, max } = autoRange(
+    visiblePoints.map((point) => point.value),
+    minimumSpan,
+  );
   ctx.fillStyle = '#334155'; ctx.font = '11px system-ui';
-  ctx.textAlign = 'right'; ctx.fillText(formatNumber(max, 4), left - 6, top + 4);
-  ctx.fillText(formatNumber(min, 4), left - 6, h - bottom + 4);
+  const axisNumber = id === 'hr-chart'
+    ? (value) => Number(value).toFixed(1)
+    : (value) => formatNumber(value, 4);
+  ctx.textAlign = 'right'; ctx.fillText(axisNumber(max), left - 6, top + 4);
+  ctx.fillText(axisNumber(min), left - 6, h - bottom + 4);
   ctx.textAlign = 'left'; ctx.fillText(axisTime(start), left, h - 4);
   ctx.textAlign = 'right'; ctx.fillText(axisTime(end), w - right, h - 4);
   ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.beginPath();
@@ -241,7 +266,9 @@ function renderMetric(points, valueId, hintId, chartId, color, missingValue = nu
     : points.filter((point) => point.value !== missingValue);
   if (valueId) {
     $(valueId).textContent = latest && !isMissing
-      ? formatNumber(latest.value)
+      ? (valueId === 'heart-rate'
+        ? Number(latest.value).toFixed(1)
+        : formatNumber(latest.value))
       : '--';
   }
   $(hintId).textContent = latest
@@ -253,7 +280,7 @@ function renderMetric(points, valueId, hintId, chartId, color, missingValue = nu
 function renderMetrics() {
   renderMetric(history.red_value, null, 'red-hint', 'red-chart', '#E63946');
   renderMetric(history.ir_value, null, 'ir-hint', 'ir-chart', '#1D3557');
-  renderMetric(history.heart_rate_bpm, 'heart-rate', 'hr-hint', 'hr-chart', '#0f766e', -1);
+  renderMetric(history.heart_rate_ewma_bpm, 'heart-rate', 'hr-hint', 'hr-chart', '#0f766e', -1);
   renderMetric(history.spo2_percent, 'spo2-estimate', 'spo2-hint', 'spo2-chart', '#457B9D', -1);
   renderMetric(history.apnea_probability, 'apnea-probability', 'apnea-hint', 'apnea-chart', '#E63946');
 }
@@ -274,7 +301,7 @@ function renderSnapshot(snapshot) {
     setApneaThreshold(snapshot.apnea_threshold);
   }
   for (const key of Object.keys(history)) history[key] = snapshot.history?.[key] || [];
-  const heartRatePoints = history.heart_rate_bpm;
+  const heartRatePoints = history.heart_rate_ewma_bpm;
   if (heartRatePoints.length > 0) {
     updateHeartbeatRate(heartRatePoints[heartRatePoints.length - 1].value);
   }
@@ -306,7 +333,7 @@ function renderSnapshot(snapshot) {
 
 function downloadSamples() {
   const columns = [
-    'red_value', 'ir_value', 'heart_rate_bpm', 'spo2_percent',
+    'red_value', 'ir_value', 'heart_rate_bpm', 'heart_rate_ewma_bpm', 'spo2_percent',
     'apnea_probability',
   ];
   const rows = [`timestamp,${columns.join(',')}`];
@@ -359,6 +386,10 @@ function formatInteger(value) {
   return value == null ? '--' : String(value);
 }
 
+function formatHeartRate(value) {
+  return value == null || value === -1 ? '--' : Number(value).toFixed(1);
+}
+
 function appendHistoryRows(rows) {
   const tbody = $('history-rows');
   if (historyLoaded === 0) tbody.replaceChildren();
@@ -368,7 +399,8 @@ function appendHistoryRows(rows) {
       new Date(row.timestamp).toLocaleString(),
       formatInteger(row.red_value),
       formatInteger(row.ir_value),
-      formatHistoryValue(row.heart_rate_bpm === -1 ? null : row.heart_rate_bpm, 4),
+      formatHeartRate(row.heart_rate_bpm),
+      formatHeartRate(row.heart_rate_ewma_bpm),
       formatHistoryValue(row.spo2_percent === -1 ? null : row.spo2_percent, 5),
       formatHistoryValue(row.apnea_probability),
     ];
@@ -384,7 +416,7 @@ function appendHistoryRows(rows) {
   $('history-count').textContent = `${historyLoaded.toLocaleString()} samples loaded`;
   $('history-older').disabled = rows.length < HISTORY_PAGE_SIZE;
   if (historyLoaded === 0) {
-    tbody.innerHTML = '<tr><td colspan="6">No samples saved yet.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7">No samples saved yet.</td></tr>';
   }
 }
 
@@ -398,7 +430,7 @@ async function loadHistory(reset = false) {
     historyBefore = null;
     historyLoaded = 0;
     historySince = getSelectedTimeCutoff('history-range');
-    $('history-rows').innerHTML = '<tr><td colspan="6">Loading…</td></tr>';
+    $('history-rows').innerHTML = '<tr><td colspan="7">Loading…</td></tr>';
   }
   const params = new URLSearchParams({ limit: HISTORY_PAGE_SIZE });
   if (historyBefore) params.set('before', historyBefore);
@@ -409,7 +441,7 @@ async function loadHistory(reset = false) {
     const result = await response.json();
     appendHistoryRows(result.samples);
   } catch (error) {
-    $('history-rows').innerHTML = `<tr><td colspan="6">Could not load history: ${error.message}</td></tr>`;
+    $('history-rows').innerHTML = `<tr><td colspan="7">Could not load history: ${error.message}</td></tr>`;
   } finally {
     historyLoading = false;
     if (historyReloadRequested) {
@@ -663,13 +695,14 @@ source.addEventListener('ble_status', (event) => {
 });
 source.addEventListener('measurement', (event) => {
   const data = JSON.parse(event.data);
-  updateHeartbeatRate(data.heart_rate_bpm);
+  updateHeartbeatRate(data.heart_rate_ewma_bpm);
   updateApneaProbability(data.apnea_probability);
   samples.set(data.time, {
     timestamp: data.time,
     red_value: data.red_value,
     ir_value: data.ir_value,
     heart_rate_bpm: data.heart_rate_bpm,
+    heart_rate_ewma_bpm: data.heart_rate_ewma_bpm,
     spo2_percent: data.spo2_percent,
     apnea_probability: data.apnea_probability,
   });
@@ -720,6 +753,7 @@ class SampleHistoryDatabase:
                     red_absorbance REAL NOT NULL,
                     ir_absorbance REAL NOT NULL,
                     heart_rate_bpm REAL,
+                    heart_rate_ewma_bpm REAL,
                     spo2_estimate_percent REAL,
                     ratio REAL,
                     apnea_probability REAL
@@ -735,6 +769,10 @@ class SampleHistoryDatabase:
             if "apnea_probability" not in sample_columns:
                 self.connection.execute(
                     "ALTER TABLE samples ADD COLUMN apnea_probability REAL"
+                )
+            if "heart_rate_ewma_bpm" not in sample_columns:
+                self.connection.execute(
+                    "ALTER TABLE samples ADD COLUMN heart_rate_ewma_bpm REAL"
                 )
             self.connection.execute(
                 """
@@ -759,16 +797,18 @@ class SampleHistoryDatabase:
                     red_absorbance,
                     ir_absorbance,
                     heart_rate_bpm,
+                    heart_rate_ewma_bpm,
                     spo2_estimate_percent,
                     ratio,
                     apnea_probability
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sample["time"],
                     sample["red_value"],
                     sample["ir_value"],
                     sample.get("heart_rate_bpm"),
+                    sample.get("heart_rate_ewma_bpm"),
                     sample.get("spo2_percent"),
                     sample["ratio"],
                     sample["apnea_probability"],
@@ -786,6 +826,7 @@ class SampleHistoryDatabase:
             red_absorbance AS red_value,
             ir_absorbance AS ir_value,
             heart_rate_bpm,
+            heart_rate_ewma_bpm,
             spo2_estimate_percent AS spo2_percent,
             ratio,
             apnea_probability
@@ -853,11 +894,14 @@ class DashboardState:
             "red_value": [],
             "ir_value": [],
             "heart_rate_bpm": [],
+            "heart_rate_ewma_bpm": [],
             "spo2_percent": [],
             "ratio": [],
             "apnea_probability": [],
         }
         self.last_sample_time: datetime | None = None
+        self.smoothed_heart_rate_bpm: float | None = None
+        self.last_valid_heart_rate_received_at: float | None = None
         self.apnea_active = False
         self.apnea_threshold = APNEA_PROBABILITY_THRESHOLD
 
@@ -887,6 +931,7 @@ class DashboardState:
             }
 
     def add_record(self, raw: bytes) -> None:
+        received_at = time.monotonic()
         try:
             fields = raw.decode("ascii").strip().split(",")
             if len(fields) != 6:
@@ -922,11 +967,37 @@ class DashboardState:
                 )
             self.last_sample_time = sample_datetime
             sample_time = sample_datetime.isoformat(timespec="milliseconds")
+            if 30 <= heart_rate_bpm <= 240:
+                previous_heart_rate = self.smoothed_heart_rate_bpm
+                if (
+                    previous_heart_rate is None
+                    or self.last_valid_heart_rate_received_at is None
+                ):
+                    heart_rate_ewma_bpm = heart_rate_bpm
+                else:
+                    elapsed = max(
+                        0.0,
+                        received_at - self.last_valid_heart_rate_received_at,
+                    )
+                    alpha = 1 - 2 ** (
+                        -elapsed / HEART_RATE_HALF_LIFE_SECONDS
+                    )
+                    heart_rate_ewma_bpm = (
+                        alpha * heart_rate_bpm
+                        + (1 - alpha) * previous_heart_rate
+                    )
+                self.smoothed_heart_rate_bpm = heart_rate_ewma_bpm
+                self.last_valid_heart_rate_received_at = received_at
+            else:
+                self.smoothed_heart_rate_bpm = None
+                self.last_valid_heart_rate_received_at = None
+                heart_rate_ewma_bpm = -1.0
             measurement: dict[str, Any] = {
                 "time": sample_time,
                 "red_value": red_value,
                 "ir_value": ir_value,
                 "heart_rate_bpm": heart_rate_bpm,
+                "heart_rate_ewma_bpm": heart_rate_ewma_bpm,
                 "spo2_percent": spo2_percent,
                 "ratio": ratio,
                 "apnea_probability": apnea_probability,
@@ -944,7 +1015,8 @@ class DashboardState:
         print(f"Received {len(raw)} bytes: {raw!r}", flush=True)
         print(
             f"{sample_time} red={red_value} IR={ir_value} "
-            f"HR={heart_rate_bpm:g} BPM SpO2={spo2_percent:g}% "
+            f"HR raw={heart_rate_bpm:.1f} BPM EWMA={heart_rate_ewma_bpm:.1f} BPM "
+            f"SpO2={spo2_percent:g}% "
             f"apnea_probability={apnea_probability:g}",
             flush=True,
         )
