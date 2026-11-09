@@ -1,4 +1,4 @@
-# VexpriX by Beatbox
+# VespriX by Beatbox
 
 VexpriX is a hardware and software prototype for detecting possible sleep apnea events from pulse oximetry data. It was developed for natHacks 2026. A MAX30102 optical sensor captures red and infrared measurements; an STM32 runs the signal-processing and apnea-inference pipeline; an ESP32 forwards the resulting data over Bluetooth Low Energy (BLE); and a Python app displays and saves the stream.
 
